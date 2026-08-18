@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="浏览器本地小模型智能体：BrowserAI + ReAct 循环 + 工具系统 + IndexedDB 记忆" />
+    <title>本地智能体 · Local Agent</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- 顶部栏 -->
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-icon">🤖</span>
+          <div>
+            <h1>本地智能体</h1>
+            <p class="brand-sub">BrowserAI · ReAct · 完全在浏览器中运行</p>
+          </div>
+        </div>
+        <div class="header-status">
+          <span id="hardware-badge" class="badge badge-muted" title="WebGPU 状态">检测硬件…</span>
+          <span id="model-badge" class="badge badge-muted">未加载模型</span>
+        </div>
+      </header>
+
+      <main class="app-main">
+        <!-- 左侧：模型面板 -->
+        <aside class="model-panel">
+          <h2>🧠 模型</h2>
+          <label class="field-label" for="model-select">选择模型</label>
+          <select id="model-select" class="model-select"></select>
+          <p class="hint">首次加载需下载数百 MB 权重，之后由浏览器缓存。文本模型需要 WebGPU。</p>
+
+          <button id="load-btn" class="btn btn-primary" type="button">加载模型</button>
+
+          <div id="progress-wrap" class="progress-wrap hidden">
+            <div class="progress-track">
+              <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+            </div>
+            <div class="progress-meta">
+              <span id="progress-pct">0%</span>
+              <span id="progress-status" class="progress-status">准备中…</span>
+            </div>
+          </div>
+
+          <div id="model-ready" class="ready-box hidden">
+            <span class="ready-dot"></span> 模型已就绪，可以开始对话
+          </div>
+
+          <div id="error-box" class="error-box hidden"></div>
+
+          <div class="panel-tips">
+            <h3>💡 试试</h3>
+            <ul>
+              <li>“现在几点” — 时间工具</li>
+              <li>“12 × 34 等于多少” — 计算工具</li>
+              <li>“我叫小明，请记住” — 长期记忆</li>
+              <li>“我叫什么名字” — 回忆记忆</li>
+              <li>“帮我搜索 2026 年世界杯” — 搜索工具</li>
+            </ul>
+          </div>
+        </aside>
+
+        <!-- 右侧：聊天面板 -->
+        <section class="chat-panel" data-local-agent-ui>
+          <div id="chat-log" class="chat-log" aria-live="polite">
+            <div class="welcome">
+              <div class="welcome-icon">🤖</div>
+              <h2>你好，我是本地智能体</h2>
+              <p>
+                我的模型完全运行在你的浏览器里（WebGPU），不上传对话。
+                <br />先点击左侧「加载模型」，然后就可以开始对话了。
+              </p>
+            </div>
+          </div>
+
+          <div class="chat-input-bar">
+            <textarea
+              id="input-box"
+              class="input-box"
+              rows="1"
+              placeholder="输入消息，Enter 发送，Shift+Enter 换行…"
+              disabled
+            ></textarea>
+            <div class="chat-actions">
+              <button id="new-chat-btn" class="btn btn-ghost" type="button" title="清空当前对话历史">🔄 新对话</button>
+              <button id="send-btn" class="btn btn-accent" type="button" disabled>发送</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

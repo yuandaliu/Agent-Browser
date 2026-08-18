@@ -1,0 +1,26 @@
+{
+  "name": "local-llm-agent",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "在浏览器中运行本地小模型智能体：BrowserAI + ReAct 循环 + 工具系统 + IndexedDB 记忆",
+  "scripts": {
+    "dev": "vite",
+    "proxy": "node server/dev-proxy.mjs",
+    "build": "vite build",
+    "build:embed": "vite build --config vite.embed.config.js",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:e2e": "node tests/e2e.mjs",
+    "test:embed": "node tests/e2e-embed-probe.mjs",
+    "test:search": "node tests/e2e-search-probe.mjs"
+  },
+  "dependencies": {
+    "@missionsquad/browserai": "^0.1.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.54.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.2.0"
+  }
+}

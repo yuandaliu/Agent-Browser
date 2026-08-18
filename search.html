@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="本地智能搜索：完全在浏览器中运行的本地智能体问答页面（悬浮球聊天）" />
+    <title>本地智能搜索</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>" />
+    <style>
+      /* ============ 仿百度首页布局 ============ */
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+        background: #fff; color: #222; min-height: 100vh;
+        display: flex; flex-direction: column;
+      }
+
+      /* 顶部导航 */
+      .nav { display: flex; justify-content: space-between; align-items: center; padding: 18px 28px; font-size: 13px; }
+      .nav a { color: #666; text-decoration: none; margin-left: 18px; }
+      .nav a:hover { color: #315efb; }
+      .nav .right a { margin-left: 18px; }
+
+      /* 主区域 */
+      .main { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 8vh 20px 40px; }
+
+      .logo { display: flex; align-items: center; margin-bottom: 34px; user-select: none; }
+      .logo .icon {
+        width: 52px; height: 52px; border-radius: 14px; margin-right: 12px;
+        background: linear-gradient(135deg, #315efb, #a55cff);
+        display: flex; align-items: center; justify-content: center; color: #fff; font-size: 26px;
+        box-shadow: 0 6px 18px rgba(49, 94, 251, 0.35);
+      }
+      .logo .text { font-size: 38px; font-weight: 700; color: #315efb; letter-spacing: 1px; }
+      .logo .text span { color: #222; font-weight: 600; font-size: 24px; margin-left: 6px; }
+
+      /* 搜索框（展示用，问答入口在右下角悬浮球） */
+      .search-wrap { position: relative; width: min(640px, 92vw); }
+      .search-box { display: flex; align-items: center; border: 2px solid #315efb; border-radius: 14px; overflow: hidden; background: #fbfcff; }
+      .search-icon { padding: 0 4px 0 16px; color: #9aa4bf; font-size: 17px; display: flex; }
+      .search-input { flex: 1; border: none; outline: none; font-size: 17px; padding: 14px 8px; color: #9aa4bf; background: transparent; cursor: default; }
+      .search-btn {
+        border: none; background: #315efb; color: #fff; font-size: 16px; font-weight: 600;
+        padding: 14px 34px; cursor: default; white-space: nowrap; opacity: 0.75;
+      }
+
+      .hot-tips { margin-top: 16px; font-size: 13px; color: #999; text-align: center; }
+      .hot-tips .hint { color: #315efb; font-weight: 600; }
+
+      /* 页脚 */
+      footer { padding: 20px; text-align: center; font-size: 12px; color: #999; }
+      footer a { color: #777; text-decoration: none; margin: 0 10px; }
+      footer a:hover { color: #315efb; }
+
+      /* ============ 悬浮球 ============ */
+      #agent-fab {
+        position: fixed; right: 24px; bottom: 24px; z-index: 9999;
+        width: 58px; height: 58px; border-radius: 50%; border: none; cursor: pointer;
+        background: linear-gradient(135deg, #315efb, #a55cff); color: #fff; font-size: 26px;
+        box-shadow: 0 10px 28px rgba(49, 94, 251, 0.45);
+        transition: transform 0.15s, box-shadow 0.15s;
+        display: flex; align-items: center; justify-content: center;
+      }
+      #agent-fab:hover { transform: scale(1.08); box-shadow: 0 14px 34px rgba(49, 94, 251, 0.55); }
+      #agent-fab .fab-badge {
+        position: absolute; top: -2px; right: -2px; width: 16px; height: 16px; border-radius: 50%;
+        background: #ef4444; border: 2px solid #fff; display: none;
+      }
+      #agent-fab.ready .fab-badge { display: block; background: #34d399; }
+
+      /* ============ 聊天弹窗（右下角，宽 600px，高 70% 页面） ============ */
+      #agent-panel {
+        position: fixed; right: 24px; bottom: 96px; z-index: 9999;
+        width: 600px; height: 70vh; max-width: calc(100vw - 48px);
+        display: none; flex-direction: column;
+        background: #0f172a; color: #e2e8f0; border-radius: 16px; overflow: hidden;
+        box-shadow: 0 28px 70px rgba(2, 6, 23, 0.55);
+        font-size: 14px;
+      }
+      #agent-panel.open { display: flex; }
+
+      .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; background: #1e293b; border-bottom: 1px solid #334155; }
+      .panel-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+      .panel-title .mini-logo { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, #315efb, #a55cff); color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+      .panel-status { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+      .panel-status.ready { color: #34d399; }
+      .panel-status.error { color: #f87171; }
+      .panel-close { background: none; border: none; color: #94a3b8; font-size: 17px; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
+      .panel-close:hover { background: #334155; color: #e2e8f0; }
+
+      /* 加载区 */
+      .panel-load { padding: 12px 18px; background: #0b1220; border-bottom: 1px solid #1e293b; display: flex; flex-direction: column; gap: 8px; }
+      .panel-load .start-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .panel-load .start-tip { font-size: 12px; color: #94a3b8; line-height: 1.6; }
+      .start-btn {
+        border: 1px solid #315efb; color: #315efb; background: transparent; font-size: 13px;
+        padding: 8px 20px; border-radius: 999px; cursor: pointer; font-weight: 600; white-space: nowrap; transition: all 0.15s;
+      }
+      .start-btn:hover { background: #315efb; color: #fff; }
+      .start-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .progress-track { height: 7px; background: #1e293b; border-radius: 999px; overflow: hidden; }
+      .progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #315efb, #a55cff); border-radius: 999px; transition: width 0.25s; }
+      .progress-meta { display: flex; justify-content: space-between; font-size: 11px; color: #94a3b8; }
+      .progress-meta .file { max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+      /* 消息区 */
+      .panel-log { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+      .panel-log::-webkit-scrollbar { width: 8px; }
+      .panel-log::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+      .log-welcome { margin: auto; text-align: center; color: #64748b; font-size: 13px; line-height: 1.9; max-width: 340px; }
+      .log-welcome .w-icon { font-size: 40px; margin-bottom: 8px; }
+
+      .msg { display: flex; flex-direction: column; gap: 6px; animation: rise 0.25s ease; }
+      @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+      .msg .bubble { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+      .msg.user { align-items: flex-end; }
+      .msg.user .bubble { background: #315efb; border-bottom-right-radius: 4px; }
+      .msg.ai { align-items: flex-start; }
+      .msg.ai .bubble { background: #1e293b; border: 1px solid #334155; border-bottom-left-radius: 4px; }
+      .msg.ai .bubble.streaming::after { content: "▌"; color: #315efb; animation: blink 0.8s infinite; }
+      @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+      /* 思考过程折叠 */
+      .steps { align-self: flex-start; width: 100%; font-size: 12px; color: #94a3b8; border: 1px dashed #334155; border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+      .steps-head { cursor: pointer; user-select: none; }
+      .steps-head:hover { color: #315efb; }
+      .steps-body { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+      .steps-body.collapsed { display: none; }
+      .steps-body .action { color: #60a5fa; }
+      .steps-body .observation { color: #fbbf24; }
+      .steps-body .raw { color: #7b87a6; font-family: Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+
+      /* 输入区 */
+      .panel-inputbar { display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid #1e293b; align-items: flex-end; }
+      .panel-input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; resize: none; font-family: inherit; font-size: 14px; line-height: 1.6; outline: none; }
+      .panel-input:focus { border-color: #315efb; }
+      .panel-input:disabled { opacity: 0.5; }
+      .panel-actions { display: flex; flex-direction: column; gap: 6px; }
+      .panel-send { padding: 10px 18px; border: none; border-radius: 10px; background: #315efb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+      .panel-send:hover { background: #2852e0; }
+      .panel-send:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+      .new-chat-btn { background: none; border: 1px solid #334155; color: #94a3b8; border-radius: 10px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+      .new-chat-btn:hover { border-color: #315efb; color: #315efb; }
+
+      /* 小屏适配 */
+      @media (max-width: 680px) {
+        #agent-panel { right: 12px; bottom: 84px; width: calc(100vw - 24px); height: 72vh; }
+        #agent-fab { right: 16px; bottom: 16px; }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 顶部导航（仿百度） -->
+    <nav class="nav">
+      <div>
+        <a href="#" onclick="return false">新闻</a><a href="#" onclick="return false">hao123</a>
+        <a href="#" onclick="return false">地图</a><a href="#" onclick="return false">贴吧</a>
+        <a href="#" onclick="return false">视频</a><a href="#" onclick="return false">图片</a>
+      </div>
+      <div class="right">
+        <a href="#" onclick="return false">设置</a><a href="#" onclick="return false">登录</a>
+      </div>
+    </nav>
+
+    <!-- 主区域（页面主体仅作展示，问答入口在右下角悬浮球） -->
+    <div class="main">
+      <div class="logo">
+        <div class="icon">🔍</div>
+        <div class="text">本地智能<span>搜索</span></div>
+      </div>
+
+      <div class="search-wrap">
+        <div class="search-box">
+          <span class="search-icon">🔎</span>
+          <input id="q" class="search-input" type="text" value="本地智能体已移至右下角悬浮球 🤖" readonly />
+          <button class="search-btn" type="button" tabindex="-1">本地问答</button>
+        </div>
+      </div>
+
+      <div class="hot-tips">
+        <span class="hint">试试问它：</span>现在几点 · 12*34 等于多少 · 记住我的名字 · WebGPU 是什么
+      </div>
+    </div>
+
+    <footer>
+      <a href="#" onclick="return false">关于本地智能搜索</a><a href="#" onclick="return false">使用前必读</a>
+      <a href="#" onclick="return false">意见反馈</a><a href="#" onclick="return false">京ICP备00000000号</a>
+      <div style="margin-top:6px">本页面中的智能体完全运行于您的浏览器（WebGPU），对话不上传服务器 © 2026</div>
+    </footer>
+
+    <!-- ============ 悬浮球 ============ -->
+    <button id="agent-fab" data-local-agent-ui title="打开本地智能体聊天">🤖<span class="fab-badge"></span></button>
+
+    <!-- ============ 聊天弹窗（右下角，宽 600px，高 70% 页面） ============ -->
+    <div id="agent-panel" data-local-agent-ui>
+      <div class="panel-head">
+        <div>
+          <div class="panel-title"><span class="mini-logo">AI</span> 本地智能体</div>
+          <div id="panel-status" class="panel-status">未启动</div>
+        </div>
+        <button id="panel-close" class="panel-close" title="收起">✕</button>
+      </div>
+
+      <!-- 加载区（模型未就绪时显示） -->
+      <div id="panel-load" class="panel-load">
+        <div class="start-row">
+          <div class="start-tip">模型完全在浏览器中运行（WebGPU）。首次加载需下载约 447MB，之后秒开。</div>
+          <button id="start-btn" class="start-btn" type="button">🧠 启动本地智能体</button>
+        </div>
+        <div id="progress-wrap" class="progress-track" style="display:none">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+        <div id="progress-meta" class="progress-meta" style="display:none">
+          <span id="progress-pct">0%</span><span id="progress-file" class="file">准备中…</span>
+        </div>
+      </div>
+
+      <!-- 消息区 -->
+      <div id="panel-log" class="panel-log">
+        <div class="log-welcome">
+          <div class="w-icon">🤖</div>
+          你好！我是本地智能体。<br />点击「启动本地智能体」加载模型后，<br />就可以向我提问了。
+        </div>
+      </div>
+
+      <!-- 输入区 -->
+      <div class="panel-inputbar">
+        <textarea id="panel-input" class="panel-input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行…" disabled></textarea>
+        <div class="panel-actions">
+          <button id="new-chat-btn" class="new-chat-btn" type="button" title="新对话">🔄</button>
+          <button id="panel-send" class="panel-send" type="button" disabled>发送</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 嵌入本地智能体（方式一：源码嵌入，由构建工具打包） -->
+    <script type="module">
+      import { createLocalAgent } from "/src/embed.js";
+
+      // ============ DOM ============
+      const fab = document.getElementById("agent-fab");
+      const panel = document.getElementById("agent-panel");
+      const panelClose = document.getElementById("panel-close");
+      const panelStatus = document.getElementById("panel-status");
+      const panelLoad = document.getElementById("panel-load");
+      const startBtn = document.getElementById("start-btn");
+      const progressWrap = document.getElementById("progress-wrap");
+      const progressMeta = document.getElementById("progress-meta");
+      const progressBar = document.getElementById("progress-bar");
+      const progressPct = document.getElementById("progress-pct");
+      const progressFile = document.getElementById("progress-file");
+      const panelLog = document.getElementById("panel-log");
+      const panelInput = document.getElementById("panel-input");
+      const panelSend = document.getElementById("panel-send");
+      const newChatBtn = document.getElementById("new-chat-btn");
+
+      // ============ 嵌入智能体 ============
+      const agent = createLocalAgent({
+        onProgress: ({ progress, status, file }) => {
+          const pct = Math.round(progress * 100);
+          progressBar.style.width = `${pct}%`;
+          progressPct.textContent = `${pct}%`;
+          progressFile.textContent = file ?? status ?? "下载中…";
+        },
+        onStatus: (message) => {
+          progressFile.textContent = message;
+        },
+        onReady: () => {
+          panelLoad.style.display = "none";
+          panelStatus.textContent = "已就绪 ✓";
+          panelStatus.classList.add("ready");
+          fab.classList.add("ready");
+          panelInput.disabled = false;
+          panelSend.disabled = false;
+          panelInput.focus();
+          console.log("✅ 模型已就绪（智能搜索页悬浮球）");
+        },
+        onError: (err) => {
+          panelStatus.textContent = `启动失败：${err.message}`;
+          panelStatus.classList.add("error");
+          startBtn.textContent = "重试启动";
+          startBtn.disabled = false;
+          console.error("智能体启动失败:", err);
+        },
+      });
+
+      // ============ 悬浮球开合 ============
+      function openPanel() {
+        panel.classList.add("open");
+        fab.style.display = "none"; // 弹窗打开时隐藏悬浮球，关闭后恢复
+      }
+      function closePanel() {
+        panel.classList.remove("open");
+        fab.style.display = "flex";
+      }
+      fab.addEventListener("click", openPanel);
+      panelClose.addEventListener("click", closePanel);
+
+      // ============ 启动加载 ============
+      let loading = false;
+      startBtn.addEventListener("click", async () => {
+        if (loading) return;
+        loading = true;
+        startBtn.disabled = true;
+        startBtn.textContent = "加载中…";
+        progressWrap.style.display = "block";
+        progressMeta.style.display = "flex";
+        panelStatus.textContent = "正在下载并加载 1B 模型（首次约 447MB）…";
+        try {
+          await agent.ready();
+          await agent.load();
+        } catch (err) {
+          console.error("加载失败:", err);
+        } finally {
+          loading = false;
+        }
+      });
+
+      // ============ 聊天 ============
+      let answering = false;
+
+      function appendTurn(question) {
+        // 移除欢迎语（若还在）
+        const welcome = panelLog.querySelector(".log-welcome");
+        if (welcome) welcome.remove();
+
+        const msgQ = document.createElement("div");
+        msgQ.className = "msg user";
+        const bubbleQ = document.createElement("div");
+        bubbleQ.className = "bubble";
+        bubbleQ.textContent = question;
+        msgQ.appendChild(bubbleQ);
+
+        const msgA = document.createElement("div");
+        msgA.className = "msg ai";
+        const bubbleA = document.createElement("div");
+        bubbleA.className = "bubble";
+        bubbleA.textContent = "…";
+        msgA.appendChild(bubbleA);
+
+        panelLog.append(msgQ, msgA);
+        panelLog.scrollTop = panelLog.scrollHeight;
+        return { bubbleA, msgA };
+      }
+
+      async function send() {
+        const text = panelInput.value.trim();
+        if (!text || answering) return;
+        if (!agent.isModelLoaded()) {
+          panelStatus.textContent = "请先点击「启动本地智能体」加载模型";
+          panelStatus.classList.add("error");
+          return;
+        }
+        answering = true;
+        panelSend.disabled = true;
+        panelInput.value = "";
+
+        const { bubbleA, msgA } = appendTurn(text);
+
+        // 思考过程折叠块
+        const steps = document.createElement("div");
+        steps.className = "steps";
+        steps.style.display = "none";
+        const stepsHead = document.createElement("span");
+        stepsHead.className = "steps-head";
+        stepsHead.textContent = "▸ 思考过程（工具调用）";
+        const stepsBody = document.createElement("div");
+        stepsBody.className = "steps-body collapsed";
+        stepsHead.addEventListener("click", () => {
+          const collapsed = stepsBody.classList.toggle("collapsed");
+          stepsHead.textContent = collapsed ? "▸ 思考过程（工具调用）" : "▾ 思考过程（工具调用）";
+        });
+        steps.append(stepsHead, stepsBody);
+        msgA.appendChild(steps);
+
+        try {
+          const { answer } = await agent.chat(text, {
+            onStep: (step) => {
+              if (step.type === "action") {
+                steps.style.display = "";
+                const line = document.createElement("div");
+                line.className = "action";
+                line.textContent = `🔧 Action: ${step.name} ${JSON.stringify(step.input ?? {})}`;
+                stepsBody.appendChild(line);
+                stepsBody.classList.remove("collapsed");
+                stepsHead.textContent = "▾ 思考过程（工具调用）";
+              } else if (step.type === "observation") {
+                const line = document.createElement("div");
+                line.className = "observation";
+                line.textContent = `👁 Observation: ${step.result}`;
+                stepsBody.appendChild(line);
+              } else if (step.type === "error") {
+                const line = document.createElement("div");
+                line.className = "observation";
+                line.textContent = `⚠️ ${step.message}`;
+                stepsBody.appendChild(line);
+              }
+            },
+            onDelta: () => {},
+          });
+          // 打字机流式渲染
+          bubbleA.classList.add("streaming");
+          bubbleA.textContent = "";
+          let i = 0;
+          const timer = setInterval(() => {
+            i++;
+            bubbleA.textContent = answer.slice(0, i);
+            panelLog.scrollTop = panelLog.scrollHeight;
+            if (i >= answer.length) {
+              clearInterval(timer);
+              bubbleA.classList.remove("streaming");
+            }
+          }, 12);
+        } catch (err) {
+          bubbleA.textContent = `出错了：${err.message}`;
+          console.error("问答失败:", err);
+        } finally {
+          answering = false;
+          panelSend.disabled = false;
+          panelInput.focus();
+        }
+      }
+
+      panelSend.addEventListener("click", send);
+      panelInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+      });
+      panelInput.addEventListener("input", () => {
+        panelInput.style.height = "auto";
+        panelInput.style.height = `${Math.min(panelInput.scrollHeight, 120)}px`;
+      });
+      newChatBtn.addEventListener("click", async () => {
+        await agent.clearHistory();
+        panelLog.innerHTML = `<div class="log-welcome"><div class="w-icon">🤖</div>新对话已开始，随时可以提问。</div>`;
+      });
+
+      // ============ 初始化 ============
+      await agent.ready();
+    </script>
+  </body>
+</html>

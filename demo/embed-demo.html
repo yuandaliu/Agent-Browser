@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>示例官网 - 已嵌入本地智能体</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
+    <style>
+      /* ---------- 宿主页面自身样式（模拟"已有网站"） ---------- */
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2937; background: #f8fafc; }
+      .nav { display: flex; justify-content: space-between; align-items: center; padding: 16px 48px; background: #fff; border-bottom: 1px solid #e5e7eb; }
+      .nav .logo { font-weight: 800; font-size: 20px; color: #2563eb; }
+      .nav a { margin-left: 24px; color: #475569; text-decoration: none; font-size: 14px; }
+      .hero { text-align: center; padding: 80px 24px; background: linear-gradient(180deg, #eff6ff, #f8fafc); }
+      .hero h1 { font-size: 40px; margin-bottom: 16px; }
+      .hero p { color: #64748b; font-size: 16px; }
+      .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; padding: 48px; max-width: 1080px; margin: 0 auto; }
+      .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; }
+      .card h3 { margin-bottom: 8px; color: #0f172a; }
+      .card p { color: #64748b; font-size: 14px; }
+      footer { text-align: center; padding: 24px; color: #94a3b8; font-size: 13px; border-top: 1px solid #e5e7eb; }
+
+      /* ---------- 聊天浮窗（嵌入组件，独立作用域） ---------- */
+      #la-fab {
+        position: fixed; right: 24px; bottom: 24px; z-index: 9999;
+        width: 56px; height: 56px; border-radius: 50%; border: none; cursor: pointer;
+        background: linear-gradient(135deg, #2563eb, #7c3aed); color: #fff; font-size: 26px;
+        box-shadow: 0 8px 24px rgba(37, 99, 235, 0.4); transition: transform 0.15s;
+      }
+      #la-fab:hover { transform: scale(1.06); }
+      #la-panel {
+        position: fixed; right: 24px; bottom: 92px; z-index: 9999;
+        width: 380px; height: 560px; display: none; flex-direction: column;
+        background: #0f172a; color: #e2e8f0; border-radius: 16px; overflow: hidden;
+        box-shadow: 0 24px 60px rgba(2, 6, 23, 0.5); font-size: 14px;
+      }
+      #la-panel.open { display: flex; }
+      #la-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; background: #1e293b; border-bottom: 1px solid #334155; }
+      #la-head .title { font-weight: 700; }
+      #la-head .status { font-size: 12px; color: #94a3b8; }
+      #la-toolbar { display: flex; gap: 8px; padding: 10px 12px; background: #0b1220; border-bottom: 1px solid #1e293b; }
+      #la-toolbar select { flex: 1; padding: 6px 8px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; font-size: 12px; }
+      #la-toolbar button { padding: 6px 10px; border-radius: 8px; border: none; cursor: pointer; font-size: 12px; background: #2563eb; color: #fff; }
+      #la-toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+      #la-progress-wrap { display: none; padding: 8px 12px; background: #0b1220; }
+      #la-progress-wrap .track { height: 6px; background: #1e293b; border-radius: 999px; overflow: hidden; }
+      #la-progress-wrap .bar { height: 100%; width: 0%; background: linear-gradient(90deg, #2563eb, #7c3aed); transition: width 0.25s; }
+      #la-progress-wrap .meta { display: flex; justify-content: space-between; margin-top: 4px; font-size: 11px; color: #94a3b8; }
+      #la-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+      #la-log .msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+      #la-log .msg.user { align-self: flex-end; background: #2563eb; border-bottom-right-radius: 4px; }
+      #la-log .msg.ai { align-self: flex-start; background: #1e293b; border-bottom-left-radius: 4px; }
+      #la-log .steps { align-self: flex-start; width: 100%; font-size: 12px; color: #94a3b8; border: 1px dashed #334155; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+      #la-log .steps .action { color: #60a5fa; }
+      #la-log .steps .observation { color: #fbbf24; }
+      #la-inputbar { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #1e293b; }
+      #la-input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; resize: none; font-family: inherit; }
+      #la-send { padding: 8px 14px; border: none; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+      #la-send:disabled { opacity: 0.5; cursor: not-allowed; }
+    </style>
+  </head>
+  <body>
+    <!-- 宿主页面内容（模拟已有网站） -->
+    <nav class="nav">
+      <div class="logo">Acme 官网</div>
+      <div><a href="#">首页</a><a href="#">产品</a><a href="#">关于</a><a href="#">联系</a></div>
+    </nav>
+    <div class="hero">
+      <h1>欢迎来到 Acme</h1>
+      <p>右下角的 🤖 按钮就是我们嵌入的本地智能体 —— 完全在浏览器中运行。</p>
+    </div>
+    <div class="cards">
+      <div class="card"><h3>产品 A</h3><p>这是原有的页面内容，与智能体互不干扰。</p></div>
+      <div class="card"><h3>产品 B</h3><p>嵌入的智能体不依赖任何服务器推理。</p></div>
+      <div class="card"><h3>产品 C</h3><p>首次使用需下载约 447MB 模型并缓存。</p></div>
+    </div>
+    <footer>© 2026 Acme. 示例页面</footer>
+
+    <!-- 聊天浮窗 -->
+    <button id="la-fab" data-local-agent-ui title="打开本地智能体">🤖</button>
+    <div id="la-panel" data-local-agent-ui>
+      <div id="la-head">
+        <div>
+          <div class="title">本地智能体</div>
+          <div class="status" id="la-status">初始化中…</div>
+        </div>
+        <button id="la-close" style="background:none;border:none;color:#94a3b8;font-size:16px;cursor:pointer">✕</button>
+      </div>
+      <div id="la-toolbar">
+        <select id="la-model"></select>
+        <button id="la-load">加载模型</button>
+      </div>
+      <div id="la-progress-wrap">
+        <div class="track"><div class="bar" id="la-bar"></div></div>
+        <div class="meta"><span id="la-pct">0%</span><span id="la-file">准备中…</span></div>
+      </div>
+      <div id="la-log">
+        <div class="msg ai">你好！我是嵌入本页面的本地智能体。点击「加载模型」后即可向我提问（如：现在几点 / 12*34 等于多少）。</div>
+      </div>
+      <div id="la-inputbar">
+        <textarea id="la-input" rows="1" placeholder="输入消息，Enter 发送" disabled></textarea>
+        <button id="la-send" disabled>发送</button>
+      </div>
+    </div>
+
+    <!-- 方式一（推荐，开发期）：直接 import 源码模块，由构建工具打包 -->
+    <script type="module">
+      import { createLocalAgent, getModelOptions, getDefaultModelId } from "/src/embed.js";
+
+      // ---------- 初始化智能体 ----------
+      const agent = createLocalAgent({
+        onProgress: ({ progress, status, file }) => {
+          const pct = Math.round(progress * 100);
+          document.getElementById("la-bar").style.width = `${pct}%`;
+          document.getElementById("la-pct").textContent = `${pct}%`;
+          if (file) document.getElementById("la-file").textContent = file;
+          else if (status) document.getElementById("la-file").textContent = status;
+        },
+        onStatus: (message) => {
+          document.getElementById("la-status").textContent = message;
+        },
+        onReady: ({ modelId }) => {
+          document.getElementById("la-status").textContent = "已就绪 ✓";
+          document.getElementById("la-load").textContent = "已就绪 ✓";
+          document.getElementById("la-load").disabled = true;
+          document.getElementById("la-input").disabled = false;
+          document.getElementById("la-send").disabled = false;
+          console.log("✅ 模型已就绪（嵌入 demo）:", modelId);
+        },
+        onError: (error) => {
+          document.getElementById("la-status").textContent = "加载失败";
+          document.getElementById("la-load").textContent = "重试加载";
+          document.getElementById("la-load").disabled = false;
+          console.error("加载失败:", error);
+        },
+      });
+
+      // ---------- 模型下拉 ----------
+      const select = document.getElementById("la-model");
+      for (const option of getModelOptions()) {
+        const opt = document.createElement("option");
+        opt.value = option.id;
+        opt.textContent = option.label;
+        select.appendChild(opt);
+      }
+      select.value = getDefaultModelId();
+
+      // ---------- 浮窗开关 ----------
+      const panel = document.getElementById("la-panel");
+      document.getElementById("la-fab").addEventListener("click", () => panel.classList.toggle("open"));
+      document.getElementById("la-close").addEventListener("click", () => panel.classList.remove("open"));
+
+      // ---------- 加载模型 ----------
+      document.getElementById("la-load").addEventListener("click", async () => {
+        document.getElementById("la-load").disabled = true;
+        document.getElementById("la-load").textContent = "加载中…";
+        document.getElementById("la-progress-wrap").style.display = "block";
+        try {
+          await agent.ready();
+          await agent.load(select.value);
+        } catch (err) {
+          document.getElementById("la-load").disabled = false;
+        }
+      });
+
+      // ---------- 对话 ----------
+      const log = document.getElementById("la-log");
+      const input = document.getElementById("la-input");
+      const sendBtn = document.getElementById("la-send");
+
+      function addBubble(role, text) {
+        const el = document.createElement("div");
+        el.className = `msg ${role}`;
+        el.textContent = text;
+        log.appendChild(el);
+        log.scrollTop = log.scrollHeight;
+        return el;
+      }
+
+      let stepsEl = null;
+      function addStep(type, text) {
+        if (!stepsEl) {
+          stepsEl = document.createElement("div");
+          stepsEl.className = "steps";
+          log.appendChild(stepsEl);
+        }
+        const line = document.createElement("div");
+        line.className = type;
+        line.textContent = type === "action" ? `🔧 Action: ${text}` : type === "observation" ? `👁 ${text}` : text;
+        stepsEl.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      async function send() {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        sendBtn.disabled = true;
+        addBubble("user", text);
+        const bubble = addBubble("ai", "…");
+        stepsEl = null;
+        try {
+          const { answer } = await agent.chat(text, {
+            onStep: (step) => {
+              if (step.type === "action") addStep("action", `${step.name} ${JSON.stringify(step.input ?? {})}`);
+              else if (step.type === "observation") addStep("observation", step.result);
+              else if (step.type === "error") addStep("observation", `⚠️ ${step.message}`);
+            },
+            onDelta: (full) => {
+              // 流式：思考过程原文实时更新
+              if (!stepsEl) addStep("raw", full);
+              else {
+                let raw = stepsEl.querySelector(".raw");
+                if (!raw) { raw = document.createElement("div"); raw.className = "raw"; stepsEl.appendChild(raw); }
+                raw.textContent = full;
+              }
+              log.scrollTop = log.scrollHeight;
+            },
+          });
+          // 最终答案打字机渲染
+          bubble.textContent = "";
+          let i = 0;
+          const timer = setInterval(() => {
+            i++;
+            bubble.textContent = answer.slice(0, i);
+            log.scrollTop = log.scrollHeight;
+            if (i >= answer.length) clearInterval(timer);
+          }, 10);
+        } catch (err) {
+          bubble.textContent = `出错了：${err.message}`;
+        } finally {
+          sendBtn.disabled = false;
+        }
+      }
+
+      sendBtn.addEventListener("click", send);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+      });
+
+      // ---------- 页面就绪 ----------
+      await agent.ready();
+      document.getElementById("la-status").textContent = "就绪，等待加载模型";
+      console.log("[embed-demo] 智能体已初始化，嵌入示例运行正常");
+    </script>
+  </body>
+</html>
