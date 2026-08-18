@@ -1,0 +1,31 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # 生产环境无需本地代理（平台 rewrites 直接转发到镜像）
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"
+
+# 模型下载代理：页面同源 /hf*、/gh-raw* 路由 → 国内可访问镜像
+[[redirects]]
+  from = "/hf/*"
+  to = "https://hf-mirror.com/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/hf-transformers/*"
+  to = "https://hf-mirror.com/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/gh-raw/mlc-ai/binary-mlc-llm-libs/*"
+  to = "https://cdn.jsdelivr.net/gh/mlc-ai/binary-mlc-llm-libs@main/:splat"
+  status = 200
+  force = true

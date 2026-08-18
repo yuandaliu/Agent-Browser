@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.npm-cache/
+*.tgz
+_pkg/
+_webllm_pkg/
+_browserai_readme.md
+.browserai/
+.DS_Store
+*.log

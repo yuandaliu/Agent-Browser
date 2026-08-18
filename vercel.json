@@ -1,0 +1,32 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin" },
+        { "key": "Cross-Origin-Embedder-Policy", "value": "require-corp" }
+      ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/hf/(.*)",
+      "destination": "https://hf-mirror.com/$1"
+    },
+    {
+      "source": "/hf-transformers/(.*)",
+      "destination": "https://hf-mirror.com/$1"
+    },
+    {
+      "source": "/gh-raw/mlc-ai/binary-mlc-llm-libs/(.*)",
+      "destination": "https://cdn.jsdelivr.net/gh/mlc-ai/binary-mlc-llm-libs@main/$1"
+    },
+    {
+      "source": "/gh-raw/([^/]+)/([^/]+)/([^/]+)/(.*)",
+      "destination": "https://cdn.jsdelivr.net/gh/$1/$2@$3/$4"
+    }
+  ]
+}
