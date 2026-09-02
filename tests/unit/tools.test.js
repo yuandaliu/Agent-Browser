@@ -35,8 +35,11 @@ describe("safeEvaluate — 安全计算器", () => {
   });
 
   it("中文算式（全角符号）会被规整后计算", () => {
-    // 模型可能输出全角符号，工具侧做规整
-    expect(safeEvaluate("１２＋３４".replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/＋/g, "+"))).toBe(46);
+    // 模型可能输出全角符号，工具侧 tokenize 入口做规整（不再依赖测试里的 replace）
+    expect(safeEvaluate("１２＋３４")).toBe(46);
+    expect(safeEvaluate("１２＊３４")).toBe(408);
+    expect(safeEvaluate("（２＋３）＊４")).toBe(20);
+    expect(safeEvaluate("９９－１３")).toBe(86);
   });
 
   it("拒绝非法输入", () => {

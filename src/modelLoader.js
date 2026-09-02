@@ -12,7 +12,7 @@
 
 const MODEL_OPTIONS = [
   { id: "Qwen3.5-0.8B-q4f16_1-MLC", label: "Qwen3.5 0.8B（低门槛，~447MB 下载 / 1.6GB 显存）" },
-  { id: "Qwen/Qwen3.5-2B", label: "Qwen3.5 2B（平衡，~2.2GB 显存 / ~1GB 下载）" },
+  { id: "Qwen/Qwen3.5-2B", label: "Qwen3.5 2B（平衡，~2.2GB 显存 / ~1GB 下载）⚠️ 待实测" },
   { id: "Qwen3.5-4B-q4f16_1-MLC", label: "Qwen3.5 4B（高质量，~3.8GB 显存 / ~2.4GB 下载）" },
 ];
 
@@ -86,6 +86,7 @@ export function createModelLoader({ browserAI, onEvent = () => {} }) {
           onEvent({ type: "progress", progress: lastProgress, status, file, modelId });
         },
       });
+      busy = false; // 成功路径显式复位，摆脱对 SDK modelloaded 事件时序的隐式依赖
       return browserAI.textModel();
     } catch (err) {
       busy = false;

@@ -17,6 +17,7 @@ const DB_VERSION = 1;
 const MESSAGES_STORE = "messages";
 const MEMORIES_STORE = "memories";
 const MAX_HISTORY = 40; // 送入模型的最近消息上限
+const MAX_STORAGE_MESSAGES = 200; // 持久化消息上限，超出自动裁剪最旧条目
 
 // ---------------------------------------------------------------------------
 // IndexedDB 适配器（浏览器）
@@ -56,6 +57,26 @@ const idbAdapter = {
   async getAll(store) {
     return tx(this._db, store, "readonly", (s) => s.getAll());
   },
+  /** 用索引游标倒序取最近 n 条（避免全表 getAll + 排序） */
+  async getRecentFromIndex(store, indexName, n) {
+    return new Promise((resolve, reject) => {
+      const txObj = this._db.transaction(store, "readonly");
+      const idx = txObj.objectStore(store).index(indexName);
+      const req = idx.openCursor(null, "prev");
+      const results = [];
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor && results.length < n) {
+          results.push(cursor.value);
+          cursor.continue();
+        } else {
+          // prev 方向是倒序，反转回升序
+          resolve(results.reverse());
+        }
+      };
+      req.onerror = () => reject(req.error);
+    });
+  },
   async add(store, value) {
     return tx(this._db, store, "readwrite", (s) => s.add(value));
   },
@@ -81,6 +102,10 @@ export function createMemoryAdapter() {
     async init() {},
     async getAll(store) {
       return [...data[store].values()];
+    },
+    async getRecentFromIndex(store, indexName, n) {
+      const all = [...data[store].values()].sort((a, b) => (a[indexName] ?? 0) - (b[indexName] ?? 0));
+      return all.slice(-n);
     },
     async add(store, value) {
       const id = store === MESSAGES_STORE ? seq++ : value.key;
@@ -122,15 +147,39 @@ export class MemoryStore {
     return all.sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  /** 最近 n 条消息（按时间升序返回） */
+  /** 最近 n 条消息（按时间升序返回）—— 优先用索引游标，回退全量加载 */
   async getRecent(n = MAX_HISTORY) {
+    if (typeof this.adapter.getRecentFromIndex === "function") {
+      try {
+        return await this.adapter.getRecentFromIndex(MESSAGES_STORE, "timestamp", n);
+      } catch {
+        /* 回退到全量加载 */
+      }
+    }
     const all = await this.getHistory();
     return all.slice(-n);
   }
 
   async addMessage(role, content) {
     const message = { role, content, timestamp: Date.now() };
-    return this.adapter.add(MESSAGES_STORE, message);
+    const id = await this.adapter.add(MESSAGES_STORE, message);
+    this.trimHistory().catch(() => {});
+    return id;
+  }
+
+  /** 超过 MAX_STORAGE_MESSAGES 时删除最旧条目，防止持久化无限增长 */
+  async trimHistory() {
+    try {
+      const all = await this.getHistory();
+      if (all.length > MAX_STORAGE_MESSAGES) {
+        const toRemove = all.slice(0, all.length - MAX_STORAGE_MESSAGES);
+        for (const m of toRemove) {
+          await this.adapter.delete(MESSAGES_STORE, m.id);
+        }
+      }
+    } catch {
+      /* 裁剪失败不影响写入 */
+    }
   }
 
   async clearHistory() {

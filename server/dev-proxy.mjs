@@ -15,14 +15,32 @@
  */
 import http from "node:http";
 import https from "node:https";
+import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.argv[2] ?? process.env.PROXY_PORT ?? 8787);
 const WORKER_HEADER = "browserai-proxy/dev";
+// 公网部署安全：设置 PROXY_TOKEN 环境变量后，所有请求需携带 X-Proxy-Token 头或 ?token= 参数。
+// 未设置时（本地开发）放行所有来源，保持原有行为。
+const PROXY_TOKEN = process.env.PROXY_TOKEN ?? "";
+
+function checkAccess(req, reqUrl) {
+  if (!PROXY_TOKEN) return true; // 开发模式：未配置 token 即放行
+  const headerToken = req.headers["x-proxy-token"] ?? "";
+  const queryToken = reqUrl.searchParams.get("token") ?? "";
+  return headerToken === PROXY_TOKEN || queryToken === PROXY_TOKEN;
+}
 
 // ---------- 路径 → 上游 URL 的映射规则 ----------
 
-function buildUpstreamUrl(reqUrl) {
-  const parts = decodeURIComponent(reqUrl.pathname).split("/").filter(Boolean);
+export function buildUpstreamUrl(reqUrl) {
+  let pathname;
+  try {
+    pathname = decodeURIComponent(reqUrl.pathname);
+  } catch {
+    // 非法百分号编码 → 当作无路由返回 404，而不是抛 URIError 崩进程
+    return null;
+  }
+  const parts = pathname.split("/").filter(Boolean);
   const [kind, ...rest] = parts;
 
   if (kind === "hf") {
@@ -120,6 +138,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 公网部署访问控制：配置了 PROXY_TOKEN 时校验令牌，防止代理被当作开放镜像中转
+  if (!checkAccess(req, reqUrl)) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("dev-proxy: access denied (token required)");
+    return;
+  }
+
   const upstream = buildUpstreamUrl(reqUrl);
   if (!upstream) {
     res.writeHead(404, { "Content-Type": "text/plain" });
@@ -164,8 +189,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[dev-proxy] listening on http://localhost:${PORT}`);
-  console.log(`[dev-proxy] /hf/*        -> https://hf-mirror.com/*`);
-  console.log(`[dev-proxy] /gh-raw/*    -> https://cdn.jsdelivr.net/gh/*`);
-});
+// 仅作为主模块直接运行时启动服务器（import 时跳过，便于单测）
+const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMainModule) {
+  server.listen(PORT, () => {
+    console.log(`[dev-proxy] listening on http://localhost:${PORT}`);
+    console.log(`[dev-proxy] /hf/*        -> https://hf-mirror.com/*`);
+    console.log(`[dev-proxy] /gh-raw/*    -> https://cdn.jsdelivr.net/gh/*`);
+  });
+}

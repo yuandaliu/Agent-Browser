@@ -10,6 +10,7 @@
  * 通过 TOOL_SCHEMAS 把工具描述注入 ReAct 系统提示词。
  */
 import { getPageSnapshot } from "./pageReader.js";
+import { validateMemoryEntry, clipText, SEARCH_QUERY_BUDGET } from "./contextBudget.js";
 
 // ---------------------------------------------------------------------------
 // 安全计算器：tokenizer + 递归下降解析器
@@ -21,10 +22,21 @@ const MAX_NUMBER_LENGTH = 20; // 防止超长数字
 const MAX_DEPTH = 32; // 防止括号深度攻击
 
 function tokenize(expr) {
+  // 全角 → 半角规整：数字 0-9、运算符、括号、全角空格。
+  // 1B 小模型常输出全角字符，与 agentLoop 的 normalizeColons 思路保持一致。
+  const normalized = expr
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/＋/g, "+")
+    .replace(/－/g, "-")
+    .replace(/＊/g, "*")
+    .replace(/／/g, "/")
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/\u3000/g, " ");
   const tokens = [];
   let i = 0;
-  while (i < expr.length) {
-    const ch = expr[i];
+  while (i < normalized.length) {
+    const ch = normalized[i];
     if (/\s/.test(ch)) {
       i++;
       continue;
@@ -32,13 +44,13 @@ function tokenize(expr) {
     if (/[0-9.]/.test(ch)) {
       let j = i;
       let dots = 0;
-      while (j < expr.length && /[0-9.]/.test(expr[j])) {
-        if (expr[j] === ".") dots++;
-        if (dots > 1) throw new ExpressionError(`数字格式错误: "${expr.slice(i, j + 1)}"`);
+      while (j < normalized.length && /[0-9.]/.test(normalized[j])) {
+        if (normalized[j] === ".") dots++;
+        if (dots > 1) throw new ExpressionError(`数字格式错误: "${normalized.slice(i, j + 1)}"`);
         j++;
       }
       if (j - i > MAX_NUMBER_LENGTH) throw new ExpressionError("数字过长");
-      const num = expr.slice(i, j);
+      const num = normalized.slice(i, j);
       if (num === "." || num.endsWith(".") || num.startsWith(".")) {
         // 允许 .5 / 5. 之类的写法，但规范化为数字
       }
@@ -51,7 +63,7 @@ function tokenize(expr) {
       i++;
       continue;
     }
-    if (ch === "*" && expr[i + 1] === "*") {
+    if (ch === "*" && normalized[i + 1] === "*") {
       tokens.push({ type: "**", value: "**" });
       i += 2;
       continue;
@@ -224,70 +236,14 @@ export async function runWebSearch(query) {
 }
 
 // ---------------------------------------------------------------------------
-// 工具注册表
+// 工具注册表：每个工具 = schema + handler，新增工具只需加一个对象（不再改 4 处）
 // ---------------------------------------------------------------------------
 
-export const TOOL_SCHEMAS = {
+const TOOLS = {
   get_current_time: {
     description: "获取当前日期和时间（本地时区）。无需参数。",
     parameters: {},
-    requiresContext: false,
-  },
-  calculate: {
-    description: "执行数学计算。支持 + - * / 和括号，例如 12+34、45*67。传入 expression 参数。",
-    parameters: { expression: "要计算的数学表达式字符串，如 \"12+34\"" },
-    requiresContext: false,
-  },
-  web_search: {
-    description: "在网络上搜索信息。传入 query 参数。",
-    parameters: { query: "搜索关键词" },
-    requiresContext: false,
-  },
-  read_page_content: {
-    description:
-      "读取当前嵌入页面（宿主网页）的实时内容，包括页面标题、网址与正文文本。不传 selector 时自动提取整个页面的正文内容（推荐用法，大多数情况直接这样调用）；可选 selector 参数只读取指定区域。当用户询问当前页面的内容、总结页面、或问题与当前页面有关时使用。",
-    parameters: { selector: "CSS 选择器（可选，一般不传）" },
-    requiresContext: false,
-  },
-  save_memory: {
-    description: "记住用户告知的重要事实（如名字、偏好）。传入 key 和 value 参数。",
-    parameters: { key: "记忆键名（如 name、preference）", value: "记忆内容（如 小明、喜欢咖啡）" },
-    requiresContext: false,
-  },
-  recall_memory: {
-    description:
-      "回忆此前记住的事实（用户主动告知并保存的名字、偏好、城市等）。传入 query 参数。注意：本工具只用于回忆已保存的记忆，不读取网页内容；若用户询问的是当前页面内容，请使用 read_page_content 工具。",
-    parameters: { query: "要回忆的关键词" },
-    requiresContext: false,
-  },
-};
-
-export const TOOL_NAMES = Object.keys(TOOL_SCHEMAS);
-
-/** 生成 ReAct 系统提示词中的工具说明 */
-export function toolsDescription() {
-  return TOOL_NAMES.map(
-    (name) =>
-      `- ${name}: ${TOOL_SCHEMAS[name].description}` +
-      (Object.keys(TOOL_SCHEMAS[name].parameters).length
-        ? ` 参数: ${Object.entries(TOOL_SCHEMAS[name].parameters)
-            .map(([k, v]) => `"${k}": ${v}`)
-            .join(", ")}`
-        : ""),
-  ).join("\n");
-}
-
-/**
- * 执行工具。ctx 提供记忆 store。返回字符串形式的观察结果。
- * 任何异常都会转成可读的错误消息（绝不向模型抛出 JS 异常）。
- */
-export async function runTool(name, input, ctx = {}) {
-  const arg = (key) => (input && typeof input === "object" ? input[key] : undefined);
-  // 解析器可能包装裸值：{"input": "..."}；工具侧按需取用
-  const rawInput = (typeof input === "string" ? input : arg("input")) ?? undefined;
-
-  switch (name) {
-    case "get_current_time": {
+    handler: () => {
       const now = new Date();
       const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
       const pad = (n) => String(n).padStart(2, "0");
@@ -296,9 +252,13 @@ export async function runTool(name, input, ctx = {}) {
         `星期${weekdays[now.getDay()]} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())} ` +
         `（时区 ${Intl.DateTimeFormat().resolvedOptions().timeZone}）`
       );
-    }
+    },
+  },
 
-    case "calculate": {
+  calculate: {
+    description: "执行数学计算。支持 + - * / 和括号，例如 12+34、45*67。传入 expression 参数。",
+    parameters: { expression: "要计算的数学表达式字符串，如 \"12+34\"" },
+    handler: (input, _ctx, { arg, rawInput }) => {
       const expression = arg("expression") ?? rawInput;
       if (typeof expression !== "string" || !expression.trim()) {
         return "计算失败：缺少 expression 参数，例如 {\"expression\": \"12+34\"}";
@@ -309,15 +269,24 @@ export async function runTool(name, input, ctx = {}) {
       } catch (err) {
         return `计算失败：${err.message}`;
       }
-    }
+    },
+  },
 
-    case "web_search": {
+  web_search: {
+    description: "在网络上搜索信息。传入 query 参数。",
+    parameters: { query: "搜索关键词" },
+    handler: (input, _ctx, { arg, rawInput }) => {
       const query = arg("query") ?? rawInput;
       if (!query) return "搜索失败：缺少 query 参数";
-      return runWebSearch(String(query));
-    }
+      return runWebSearch(clipText(String(query), SEARCH_QUERY_BUDGET, { label: "query 已截断" }));
+    },
+  },
 
-    case "read_page_content": {
+  read_page_content: {
+    description:
+      "读取当前嵌入页面（宿主网页）的实时内容，包括页面标题、网址与正文文本。不传 selector 时自动提取整个页面的正文内容（推荐用法，大多数情况直接这样调用）；可选 selector 参数只读取指定区域。当用户询问当前页面的内容、总结页面、或问题与当前页面有关时使用。",
+    parameters: { selector: "CSS 选择器（可选，一般不传）" },
+    handler: (input, _ctx, { arg, rawInput }) => {
       const selector = arg("selector") ?? rawInput;
       const snapshot = getPageSnapshot(
         typeof selector === "string" && selector.trim() ? { selector: selector.trim() } : {},
@@ -326,18 +295,29 @@ export async function runTool(name, input, ctx = {}) {
       const head = `页面「${snapshot.title}」(${snapshot.url})`;
       const note = snapshot.note ? `${snapshot.note}\n` : "";
       return snapshot.text ? `${note}${head}\n${snapshot.text}` : `${note}${head}\n（页面无可见文本内容）`;
-    }
+    },
+  },
 
-    case "save_memory": {
+  save_memory: {
+    description: "记住用户告知的重要事实（如名字、偏好）。传入 key 和 value 参数。",
+    parameters: { key: "记忆键名（如 name、preference）", value: "记忆内容（如 小明、喜欢咖啡）" },
+    handler: (input, ctx, { arg }) => {
       const key = arg("key") ?? input?.key;
       const value = arg("value") ?? input?.value;
       if (!key || value === undefined) return "记忆失败：需要 key 和 value 参数";
+      const validationError = validateMemoryEntry(key, value);
+      if (validationError) return `记忆失败：${validationError}`;
       if (!ctx.memory) return "记忆失败：记忆系统不可用";
-      await ctx.memory.saveMemory(String(key), String(value));
-      return `已记住：${key} = ${value}`;
-    }
+      // save_memory 是异步 handler，但 registry 调用统一 await
+      return ctx.memory.saveMemory(String(key), String(value)).then(() => `已记住：${key} = ${value}`);
+    },
+  },
 
-    case "recall_memory": {
+  recall_memory: {
+    description:
+      "回忆此前记住的事实（用户主动告知并保存的名字、偏好、城市等）。传入 query 参数。注意：本工具只用于回忆已保存的记忆，不读取网页内容；若用户询问的是当前页面内容，请使用 read_page_content 工具。",
+    parameters: { query: "要回忆的关键词" },
+    handler: async (input, ctx, { arg, rawInput }) => {
       const query = arg("query") ?? rawInput;
       if (!ctx.memory) return "记忆失败：记忆系统不可用";
       const memories = await ctx.memory.recall(query);
@@ -348,9 +328,44 @@ export async function runTool(name, input, ctx = {}) {
         );
       }
       return memories.map((m) => `${m.key} = ${m.value}`).join("\n");
-    }
+    },
+  },
+};
 
-    default:
-      return `未知工具：${name}`;
+/** 对外暴露的 schema 表（保持向后兼容） */
+export const TOOL_SCHEMAS = Object.fromEntries(
+  Object.entries(TOOLS).map(([name, { description, parameters }]) => [
+    name,
+    { description, parameters, requiresContext: false },
+  ]),
+);
+
+export const TOOL_NAMES = Object.keys(TOOLS);
+
+/** 生成 ReAct 系统提示词中的工具说明 */
+export function toolsDescription() {
+  return TOOL_NAMES.map((name) => {
+    const t = TOOLS[name];
+    const params = Object.entries(t.parameters);
+    const paramStr = params.length
+      ? ` 参数: ${params.map(([k, v]) => `"${k}": ${v}`).join(", ")}`
+      : "";
+    return `- ${name}: ${t.description}${paramStr}`;
+  }).join("\n");
+}
+
+/**
+ * 执行工具。ctx 提供记忆 store。返回字符串形式的观察结果。
+ * 任何异常都会转成可读的错误消息（绝不向模型抛出 JS 异常）。
+ */
+export async function runTool(name, input, ctx = {}) {
+  const tool = TOOLS[name];
+  if (!tool) return `未知工具：${name}`;
+  const arg = (key) => (input && typeof input === "object" ? input[key] : undefined);
+  const rawInput = (typeof input === "string" ? input : arg("input")) ?? undefined;
+  try {
+    return await tool.handler(input, ctx, { arg, rawInput });
+  } catch (err) {
+    return `工具执行出错: ${err?.message ?? err}`;
   }
 }

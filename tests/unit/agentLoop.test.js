@@ -195,6 +195,8 @@ describe("runAgent — ReAct 循环", () => {
       maxSteps: 3,
     });
     expect(result.answer).toContain("多次");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("max_steps");
   });
 
   it("相同 Action 连续出现 3 次触发死循环保护", async () => {
@@ -207,6 +209,8 @@ describe("runAgent — ReAct 循环", () => {
     });
     expect(result.answer).toContain("连续");
     expect(result.answer).toContain("停止尝试");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("loop");
   });
 
   it("连续第 2 次调用同一工具时注入换工具引导", async () => {
@@ -262,6 +266,17 @@ describe("runAgent — ReAct 循环", () => {
       },
     });
     expect(result.answer).toContain("engine crashed");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("error");
+  });
+
+  it("正常完成的回答标记 ok=true", async () => {
+    const result = await runAgent({
+      userInput: "你好",
+      memory: createMockMemory(),
+      generate: async () => ({ text: "Final: 你好！我是本地智能体。" }),
+    });
+    expect(result.ok).toBe(true);
   });
 
   it("历史消息注入最近对话（记住上一轮）", async () => {

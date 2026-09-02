@@ -14,13 +14,15 @@
  * 一次 import 即可使用，详见 INTEGRATION.md。
  */
 import { BrowserAI } from "@missionsquad/browserai";
-import { MemoryStore } from "./memory.js";
+import { MemoryStore, createMemoryAdapter } from "./memory.js";
 import { createModelLoader, getModelOptions, getDefaultModelId } from "./modelLoader.js";
 import { runAgent } from "./agentLoop.js";
 import { initPageWatcher, getPageSnapshot } from "./pageReader.js";
+import { getFailureLog } from "./failureLog.js";
 
 export { getModelOptions, getDefaultModelId, BrowserAI, getPageSnapshot, initPageWatcher };
 export { safeEvaluate } from "./tools.js";
+export { getFailureLog, resetFailureLogSingleton, FailureLog, MAX_FAILURES } from "./failureLog.js";
 
 const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
 
@@ -79,25 +81,36 @@ export function createLocalAgent(options = {}) {
   const ai = new BrowserAI({
     modelSource,
     proxyOrigin,
-    verifyProxy: verifyProxy ?? (modelSource === "proxy" ? isLocal : true),
+    verifyProxy: verifyProxy ?? (modelSource === "proxy" ? isLocal : false),
     cacheBackend: "indexeddb",
     webllm: { logLevel: "INFO" },
   });
 
-  const memory = memoryAdapter ? new MemoryStore(memoryAdapter) : new MemoryStore();
+  let memory = memoryAdapter ? new MemoryStore(memoryAdapter) : new MemoryStore();
   const loader = createModelLoader({ browserAI: ai, onEvent: emit });
+  const failureLog = getFailureLog();
 
   let initialized = false;
   let initPromise = null;
   let chatting = false;
   let pageWatcher = null;
 
-  /** 初始化：打开 IndexedDB、订阅事件、探测硬件、启动页面实时监听。可重复调用。 */
+  /** 初始化：打开 IndexedDB（失败降级内存适配器）、订阅事件、探测硬件、启动页面实时监听。可重复调用。 */
   async function ready() {
     if (initialized) return;
     if (initPromise) return initPromise;
     initPromise = (async () => {
-      await memory.init();
+      try {
+        await memory.init();
+      } catch (err) {
+        console.warn("[embed] IndexedDB 不可用，降级到内存适配器（记忆不会持久化）:", err?.message ?? err);
+        memory = new MemoryStore(createMemoryAdapter());
+        try {
+          await memory.init();
+        } catch (err2) {
+          console.warn("[embed] 内存适配器初始化也失败，记忆功能将不可用:", err2?.message ?? err2);
+        }
+      }
       initialized = true;
       // 启动当前宿主页面实时监听（MutationObserver 维护正文缓存，供 read_page_content 使用）
       pageWatcher = initPageWatcher();
@@ -145,7 +158,7 @@ export function createLocalAgent(options = {}) {
    * @param {(full:string)=>void} [callbacks.onDelta] 模型流式输出（每轮生成累计文本）
    * @returns {Promise<{answer:string, steps:object[], rawTexts:string[]}>}
    */
-  async function chat(text, { onStep, onDelta } = {}) {
+  async function chat(text, { onStep, onDelta, signal } = {}) {
     if (typeof text !== "string" || !text.trim()) throw new Error("chat: 输入不能为空");
     if (chatting) throw new Error("chat: 已有对话正在进行");
     if (!loader.getLoadedModelId()) {
@@ -159,19 +172,50 @@ export function createLocalAgent(options = {}) {
       if (typeof document !== "undefined" && typeof location !== "undefined") {
         systemExtras = `当前所在页面：标题「${document.title}」，网址 ${location.href}。用户可能询问页面内容，需要时可调用 read_page_content 工具读取页面实时内容。`;
       }
-      const result = await runAgent({
-        userInput: text,
-        memory,
-        maxSteps,
-        systemExtras,
-        generate: async (messages, generateCallbacks) =>
-          ai.generateText(messages, {
-            runtime: { maxTokens: 768 },
-            onDelta: generateCallbacks.onDelta ?? onDelta,
-          }),
-        onStep,
-      });
-      await memory.addMessage("assistant", result.answer);
+      let result;
+      try {
+        result = await runAgent({
+          userInput: text,
+          memory,
+          maxSteps,
+          systemExtras,
+          signal,
+          generate: async (messages, generateCallbacks) =>
+            ai.generateText(messages, {
+              runtime: { maxTokens: 768 },
+              onDelta: generateCallbacks.onDelta ?? onDelta,
+              signal: generateCallbacks.signal,
+            }),
+          onStep,
+        });
+      } catch (err) {
+        // runAgent 自身抛错（极少：默认所有错误都已转成 ok:false 返回）：
+        // 记录到失败日志后重新抛给调用方（UI 层处理展示）
+        failureLog.record({
+          userInput: text,
+          ok: false,
+          reason: "exception",
+          answer: err?.message ?? String(err),
+          steps: [],
+          rawTexts: [],
+          signalAborted: err?.name === "AbortError" || /abort|中止/i.test(err?.message ?? ""),
+        });
+        throw err;
+      }
+      if (result.ok !== false) {
+        // 成功的回答落库到 IndexedDB 持久化历史
+        await memory.addMessage("assistant", result.answer);
+      } else {
+        // 失败对话：仅记到 failureLog（localStorage，最近 20 条），不污染持久化历史
+        failureLog.record({
+          userInput: text,
+          ok: false,
+          reason: result.reason,
+          answer: result.answer,
+          steps: result.steps,
+          rawTexts: result.rawTexts,
+        });
+      }
       return result;
     } finally {
       chatting = false;
@@ -185,6 +229,10 @@ export function createLocalAgent(options = {}) {
   const saveMemory = (key, value) => memory.saveMemory(key, value);
   const recallMemory = (query) => memory.recall(query);
   const clearMemories = () => memory.clearMemories();
+
+  // ---- 失败日志（调试用：失败对话不入持久化历史，但记到 localStorage 最近 20 条） ----
+  const getFailureLog = () => failureLog.getAll();
+  const clearFailureLog = () => failureLog.clear();
 
   /** 卸载模型（释放显存/WebGPU 上下文） */
   async function unload() {
@@ -213,6 +261,9 @@ export function createLocalAgent(options = {}) {
     saveMemory,
     recallMemory,
     clearMemories,
+    // 失败日志（调试用，宿主页面可挂一个"诊断"按钮调出来）
+    getFailureLog,
+    clearFailureLog,
     // 高级用法：暴露底层实例
     _ai: ai,
     _memory: memory,

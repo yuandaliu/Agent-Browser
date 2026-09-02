@@ -126,13 +126,21 @@ export function pickMainContent(doc = null) {
 let cache = { version: 0, text: "", updatedAt: 0 };
 let refreshTimer = null;
 let observer = null;
+let observerRefCount = 0;
+let popstateHandler = null;
 let pushStatePatched = false;
+let replaceStatePatched = false;
 
 function refreshCache(maxChars) {
   try {
     const root = pickMainContent() ?? document.body;
-    const text = extractVisibleText(root);
-    cache = { version: cache.version + 1, text, updatedAt: Date.now() };
+    const raw = extractVisibleText(root);
+    cache = {
+      version: cache.version + 1,
+      text: truncateText(raw, maxChars),
+      rawLength: raw.length,
+      updatedAt: Date.now(),
+    };
   } catch {
     /* DOM 读取失败时保留旧缓存 */
   }
@@ -140,49 +148,74 @@ function refreshCache(maxChars) {
 
 /**
  * 启动页面实时监听：DOM 变化（防抖）与 SPA 路由变化时刷新正文缓存。
- * 幂等，可重复调用。返回控制器 { getSnapshot, dispose }。
+ * 多实例安全：底层 observer / cache 为单例（页面只有一个），但每个调用方拿到独立的
+ * dispose 句柄，引用计数归零才真正 disconnect，避免一个实例 dispose 误伤其他实例。
+ * 返回控制器 { getSnapshot, dispose }。
  */
 export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS } = {}) {
   if (typeof document === "undefined" || typeof MutationObserver === "undefined") {
     return null;
   }
-  if (observer) return pageWatcherApi;
 
-  const scheduleRefresh = () => {
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => refreshCache(maxChars), debounceMs);
-  };
-
-  observer = new MutationObserver(scheduleRefresh);
-  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-
-  if (typeof window !== "undefined") {
-    window.addEventListener("popstate", scheduleRefresh);
-  }
-  if (!pushStatePatched && typeof history !== "undefined" && typeof history.pushState === "function") {
-    const original = history.pushState;
-    history.pushState = function (...args) {
-      const result = original.apply(this, args);
-      scheduleRefresh();
-      return result;
+  // 首次初始化创建 observer 与路由 patch；后续调用只增加引用计数
+  if (!observer) {
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => refreshCache(maxChars), debounceMs);
     };
-    pushStatePatched = true;
+
+    observer = new MutationObserver(scheduleRefresh);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+    if (typeof window !== "undefined") {
+      popstateHandler = scheduleRefresh;
+      window.addEventListener("popstate", popstateHandler);
+    }
+    // patch pushState + replaceState 覆盖 SPA 路由切换（幂等，只 patch 一次）
+    if (!pushStatePatched && typeof history !== "undefined" && typeof history.pushState === "function") {
+      const original = history.pushState;
+      history.pushState = function (...args) {
+        const result = original.apply(this, args);
+        scheduleRefresh();
+        return result;
+      };
+      pushStatePatched = true;
+    }
+    if (!replaceStatePatched && typeof history !== "undefined" && typeof history.replaceState === "function") {
+      const original = history.replaceState;
+      history.replaceState = function (...args) {
+        const result = original.apply(this, args);
+        scheduleRefresh();
+        return result;
+      };
+      replaceStatePatched = true;
+    }
+
+    refreshCache(maxChars); // 初始快照
   }
 
-  refreshCache(maxChars); // 初始快照
+  observerRefCount++;
 
-  return pageWatcherApi;
+  // 返回独立控制器：dispose 只减引用计数，归零才真正释放底层资源
+  return {
+    getSnapshot: (opts) => getPageSnapshot(opts),
+    dispose: () => {
+      observerRefCount = Math.max(0, observerRefCount - 1);
+      if (observerRefCount === 0) {
+        observer?.disconnect();
+        observer = null;
+        if (refreshTimer) {
+          clearTimeout(refreshTimer);
+          refreshTimer = null;
+        }
+        if (popstateHandler && typeof window !== "undefined") {
+          window.removeEventListener("popstate", popstateHandler);
+          popstateHandler = null;
+        }
+      }
+    },
+  };
 }
-
-const pageWatcherApi = {
-  getSnapshot: (opts) => getPageSnapshot(opts),
-  dispose: () => {
-    observer?.disconnect();
-    observer = null;
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = null;
-  },
-};
 
 /**
  * 读取当前页面内容快照。
@@ -200,15 +233,16 @@ export function getPageSnapshot({ selector = null, maxChars = DEFAULT_MAX_CHARS 
   /** 整页读取：优先 MutationObserver 维护的实时缓存 */
   const readWholePage = () => {
     if (cache.version > 0) {
+      const rawLen = cache.rawLength ?? cache.text.length;
       return {
         ok: true,
         title: document.title,
         url: location.href,
         text: cache.text,
-        length: cache.text.length,
+        length: rawLen,
         source: "cache",
         updatedAt: cache.updatedAt,
-        truncated: cache.text.length > 0 && cache.text.length >= DEFAULT_MAX_CHARS * 0.9,
+        truncated: rawLen > maxChars,
       };
     }
     const root = pickMainContent() ?? document.body;

@@ -1,28 +1,21 @@
 /**
- * main.js — 应用入口：组装模型加载、ReAct 循环、工具、记忆与 UI
+ * main.js — 应用入口：基于 embed.js 的组件 API 组装 UI
+ *
+ * 重构说明：核心流程（模型加载 / ReAct 循环 / 历史保存 / 页面监听）统一收敛到
+ * createLocalAgent，本文件只负责 DOM 渲染与事件绑定，消除此前与 embed.js 的双套状态机。
  */
-import { BrowserAI } from "@missionsquad/browserai";
-import { getMemoryStore } from "./memory.js";
-import { createModelLoader, getModelOptions, getDefaultModelId } from "./modelLoader.js";
-import { runAgent } from "./agentLoop.js";
+import { createLocalAgent, getModelOptions, getDefaultModelId } from "./embed.js";
 
 // ---------------------------------------------------------------------------
-// 初始化
+// 初始化：创建智能体实例并 ready（内部完成 IndexedDB 降级 + WebGPU 预检 + 页面监听）
 // ---------------------------------------------------------------------------
 
-/** 部署模式：本地开发走 Vite 代理 + verifyProxy；托管平台依赖 rewrites 转发到镜像 */
-const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
-
-const ai = new BrowserAI({
-  modelSource: "proxy", // 模型文件经页面同源 /hf*、/gh-raw* 路由下载
-  proxyOrigin: undefined, // 默认页面 origin（同源，避免 CORS 与混合内容问题）
-  verifyProxy: isLocalhost, // 本地代理提供 X-Proxy-Worker 健康检查；托管平台由配置保证
-  webllm: { logLevel: "INFO" },
-  cacheBackend: "indexeddb", // WebLLM 权重缓存到 IndexedDB
-});
-
-const memory = await getMemoryStore();
-const loader = createModelLoader({ browserAI: ai, onEvent: handleModelEvent });
+const agent = createLocalAgent({ onEvent: handleModelEvent });
+try {
+  await agent.ready();
+} catch (err) {
+  console.error("[app] 智能体初始化失败:", err);
+}
 
 // ---------------------------------------------------------------------------
 // DOM 引用
@@ -69,6 +62,10 @@ function handleModelEvent(event) {
       const ok = event.snapshot.webgpuSupported;
       el.hardwareBadge.textContent = ok ? "WebGPU ✓" : "WebGPU ✗";
       el.hardwareBadge.className = `badge ${ok ? "badge-ok" : "badge-err"}`;
+      if (!ok) {
+        el.errorBox.textContent = `当前浏览器不支持 WebGPU（${event.snapshot.webgpuReason ?? "未知原因"}），无法运行本地模型。请使用最新 Chrome/Edge。`;
+        el.errorBox.classList.remove("hidden");
+      }
       break;
     }
     case "progress": {
@@ -95,7 +92,7 @@ function handleModelEvent(event) {
       el.loadBtn.disabled = true;
       el.inputBox.disabled = false;
       el.sendBtn.disabled = false;
-      console.log("✅ 模型已就绪:", event.modelId); // 验收：控制台输出“模型已就绪”
+      console.log("✅ 模型已就绪:", event.modelId); // 验收：控制台输出"模型已就绪"
       break;
     }
     case "error": {
@@ -126,11 +123,9 @@ el.loadBtn.addEventListener("click", async () => {
   const modelId = el.modelSelect.value;
   console.log(`[app] 开始加载模型: ${modelId}`);
   try {
-    await loader.load(modelId);
+    await agent.load(modelId);
   } catch (err) {
     console.error("[app] 模型加载失败:", err);
-  } finally {
-    el.loadBtn.disabled = !loader.isBusy() && !loader.getLoadedModelId();
   }
 });
 
@@ -271,32 +266,36 @@ function scrollToBottom() {
 }
 
 // ---------------------------------------------------------------------------
-// 发送
+// 发送：委托给 agent.chat，历史与失败落库由 embed 内部统一处理
 // ---------------------------------------------------------------------------
 
 let sending = false;
+let abortController = null;
 
 async function handleSend() {
+  // 正在发送中再次点击 sendBtn → 中止当前对话
+  if (sending && abortController) {
+    abortController.abort();
+    return;
+  }
   const text = el.inputBox.value.trim();
-  if (!text || sending) return;
-  if (!loader.getLoadedModelId()) {
+  if (!text) return;
+  if (!agent.getLoadedModelId()) {
     el.errorBox.textContent = "请先加载模型再开始对话。";
     el.errorBox.classList.remove("hidden");
     return;
   }
 
   sending = true;
-  el.sendBtn.disabled = true;
+  abortController = new AbortController();
+  el.sendBtn.textContent = "停止";
+  el.sendBtn.disabled = false; // 保持可点击，用于中止
   el.inputBox.value = "";
 
-  // 渲染用户消息 + 持久化
+  // 渲染用户消息 + 助手消息骨架（user 消息由 agent.chat 内部持久化）
   appendMessage("user", text);
-  await memory.addMessage("user", text).catch(() => {});
-
-  // 助手消息骨架
   const { bubble } = appendMessage("ai", "…");
 
-  let finalAnswer = "";
   let stopTypewriter = null;
 
   const onStep = (step) => {
@@ -330,34 +329,26 @@ async function handleSend() {
   };
 
   try {
-    const result = await runAgent({
-      userInput: text,
-      memory,
-      generate: async (messages, { onDelta }) => {
-        return ai.generateText(messages, {
-          runtime: { maxTokens: 768 },
-          onDelta,
-        });
-      },
-      onStep,
-    });
-    finalAnswer = result.answer;
-
+    const result = await agent.chat(text, { onStep, signal: abortController.signal });
+    const finalAnswer = result.answer;
     // 确保最终答案已渲染（若未走到 final 步骤）
     if (stopTypewriter) stopTypewriter();
     if (bubble.textContent !== finalAnswer) {
       bubble.textContent = finalAnswer;
       bubble.classList.remove("streaming");
     }
-    await memory.addMessage("assistant", finalAnswer).catch(() => {});
-    console.log(`[app] 完成（${result.steps.length} 步）：`, finalAnswer);
+    console.log(`[app] 完成（${result.steps.length} 步，ok=${result.ok !== false}）：`, finalAnswer);
   } catch (err) {
+    const isAborted = err?.name === "AbortError" || /abort|中止/i.test(err?.message ?? "");
     console.error("[app] 对话失败:", err);
-    bubble.textContent = `出错了：${err?.message ?? err}`;
+    bubble.textContent = isAborted ? "（已中止）" : `出错了：${err?.message ?? err}`;
     bubble.classList.remove("streaming");
   } finally {
+    if (stopTypewriter) stopTypewriter();
     endStepsBlock();
     sending = false;
+    abortController = null;
+    el.sendBtn.textContent = "发送";
     el.sendBtn.disabled = false;
     el.inputBox.focus();
     scrollToBottom();
@@ -381,7 +372,7 @@ el.inputBox.addEventListener("input", () => {
 // ---------------------------------------------------------------------------
 
 el.newChatBtn.addEventListener("click", async () => {
-  await memory.clearHistory().catch(() => {});
+  await agent.clearHistory().catch(() => {});
   el.chatLog.innerHTML = "";
   const welcome = document.createElement("div");
   welcome.className = "welcome";
@@ -389,23 +380,3 @@ el.newChatBtn.addEventListener("click", async () => {
   el.chatLog.appendChild(welcome);
   console.log("[app] 已清空对话历史");
 });
-
-// ---------------------------------------------------------------------------
-// 启动时 WebGPU 预检
-// ---------------------------------------------------------------------------
-
-(async () => {
-  try {
-    const snapshot = await ai.probeHardware();
-    const ok = snapshot.webgpuSupported;
-    el.hardwareBadge.textContent = ok ? "WebGPU ✓" : "WebGPU ✗";
-    el.hardwareBadge.className = `badge ${ok ? "badge-ok" : "badge-err"}`;
-    if (!ok) {
-      el.errorBox.textContent = `当前浏览器不支持 WebGPU（${snapshot.webgpuReason ?? "未知原因"}），无法运行本地模型。请使用最新 Chrome/Edge。`;
-      el.errorBox.classList.remove("hidden");
-    }
-    console.log("[app] WebGPU 检测:", ok ? "支持" : "不支持", snapshot.webgpuReason ?? "");
-  } catch (err) {
-    console.warn("[app] WebGPU 检测失败:", err);
-  }
-})();
