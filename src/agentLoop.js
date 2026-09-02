@@ -15,6 +15,7 @@
  */
 
 import { runTool, TOOL_NAMES, toolsDescription } from "./tools.js";
+import { budgetMemoryContext, budgetObservation, budgetHistory } from "./contextBudget.js";
 
 export const MAX_STEPS = 5;
 export const MAX_HISTORY_MESSAGES = 8; // 送入模型的最近对话条数
@@ -194,7 +195,7 @@ export function parseReActOutput(text) {
  * @param {string} [opts.systemExtras] 附加到系统提示词的额外上下文（如当前页面信息）
  * @returns {Promise<{answer:string, rawTexts:string[], steps:object[]}>}
  */
-export async function runAgent({ userInput, memory, generate, onStep = () => {}, maxSteps = MAX_STEPS, systemExtras = "" }) {
+export async function runAgent({ userInput, memory, generate, onStep = () => {}, maxSteps = MAX_STEPS, systemExtras = "", signal }) {
   const steps = [];
   const rawTexts = [];
   const emit = (step) => {
@@ -202,12 +203,12 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     onStep(step);
   };
 
-  // 注入长期记忆摘要（若存在）
+  // 注入长期记忆摘要（若存在）—— 裁剪后注入，避免 system prompt 无限膨胀
   let memoryContext = "";
   try {
     const memories = await memory.recall("");
     if (memories && memories.length > 0) {
-      memoryContext = memories.map((m) => `- ${m.key}: ${m.value}`).join("\n");
+      memoryContext = budgetMemoryContext(memories);
     }
   } catch {
     /* 记忆不可用时不阻断对话 */
@@ -215,16 +216,17 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
 
   const system = buildSystemPrompt({ toolsDescription: toolsDescription(), memoryContext, systemExtras });
 
-  // 组装消息：system + 最近历史 + 当前用户输入
+  // 组装消息：system + 最近历史（每条裁剪）+ 当前用户输入
   let history = [];
   try {
     history = await memory.getRecent(MAX_HISTORY_MESSAGES);
   } catch {
     history = [];
   }
+  const budgetedHistory = budgetHistory(history);
   const messages = [
     { role: "system", content: system },
-    ...history.map((m) => ({ role: m.role, content: m.content })),
+    ...budgetedHistory.map((m) => ({ role: m.role, content: m.content })),
     { role: "user", content: userInput },
   ];
 
@@ -232,15 +234,20 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
   let actionRepeatCount = 0;
 
   for (let step = 0; step < maxSteps; step++) {
+    if (signal?.aborted) {
+      emit({ type: "error", message: "用户已中止对话" });
+      return { answer: "（已中止）", rawTexts, steps, ok: false, reason: "aborted" };
+    }
     let text;
     try {
       const result = await generate(messages, {
         onDelta: (full) => emit({ type: "stream", text: full }),
+        signal,
       });
       text = result.text ?? "";
     } catch (err) {
       emit({ type: "error", message: `模型生成失败: ${err?.message ?? err}` });
-      return { answer: `抱歉，模型生成时出错：${err?.message ?? err}`, rawTexts, steps };
+      return { answer: `抱歉，模型生成时出错：${err?.message ?? err}`, rawTexts, steps, ok: false, reason: "error" };
     }
     rawTexts.push(text);
 
@@ -262,7 +269,7 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
       // 连续第 3 次调用同一工具（count >= 2）：终止循环，给出明确的失败说明
       if (actionRepeatCount >= 2) {
         const answer = `我连续 ${actionRepeatCount + 1} 次调用"${parsed.name}"工具仍未解决问题，已停止尝试。请换一种更明确的说法，或直接描述你的具体需求。`;
-        return { answer, rawTexts, steps };
+        return { answer, rawTexts, steps, ok: false, reason: "loop" };
       }
 
       let result;
@@ -280,18 +287,18 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
           ? `\n提示：这是你连续第 2 次调用 "${parsed.name}"，说明该工具没有解决问题。请停止调用它：换一个更合适的工具（如需读取页面内容请用 read_page_content），或直接输出 Final 回答。`
           : "";
 
-      // 把模型输出与观察结果拼回消息，驱动下一步
+      // 把模型输出与观察结果拼回消息，驱动下一步（Observation 裁剪后注入，不影响 UI 展示）
       messages.push({ role: "assistant", content: text });
-      messages.push({ role: "user", content: `Observation: ${result}${hint}` });
+      messages.push({ role: "user", content: `Observation: ${budgetObservation(result)}${hint}` });
       continue;
     }
 
     // final / unknown → 结束
     const answer = parsed.type === "final" ? parsed.text : text.trim();
     emit({ type: "final", text: answer });
-    return { answer, rawTexts, steps };
+    return { answer, rawTexts, steps, ok: true };
   }
 
   emit({ type: "error", message: `超过最大步数（${maxSteps}），终止循环` });
-  return { answer: "我尝试了多次但未能完成这个请求，请简化一下问题或换种说法。", rawTexts, steps };
+  return { answer: "我尝试了多次但未能完成这个请求，请简化一下问题或换种说法。", rawTexts, steps, ok: false, reason: "max_steps" };
 }
