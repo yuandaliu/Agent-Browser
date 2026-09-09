@@ -153,7 +153,7 @@ function appendMessage(role, content) {
   wrapper.appendChild(body);
   el.chatLog.appendChild(wrapper);
   scrollToBottom();
-  return { wrapper, bubble };
+  return bubble;
 }
 
 /** 创建（或复用）助手消息的思考过程折叠区 */
@@ -208,7 +208,6 @@ function addStepLine(type, text) {
   const { stepsBody } = startStepsBlock();
   const line = document.createElement("div");
   line.className = `step-line step-${type}`;
-  line.innerHTML = "";
   if (type === "action") {
     const tag = document.createElement("span");
     tag.className = "step-tag";
@@ -294,7 +293,7 @@ async function handleSend() {
 
   // 渲染用户消息 + 助手消息骨架（user 消息由 agent.chat 内部持久化）
   appendMessage("user", text);
-  const { bubble } = appendMessage("ai", "…");
+  const bubble = appendMessage("ai", "…");
 
   let stopTypewriter = null;
 

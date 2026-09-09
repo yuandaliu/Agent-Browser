@@ -22,7 +22,7 @@ import { getFailureLog } from "./failureLog.js";
 
 export { getModelOptions, getDefaultModelId, BrowserAI, getPageSnapshot, initPageWatcher };
 export { safeEvaluate } from "./tools.js";
-export { getFailureLog, resetFailureLogSingleton, FailureLog, MAX_FAILURES } from "./failureLog.js";
+export { getFailureLog, FailureLog, MAX_FAILURES } from "./failureLog.js";
 
 const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
 

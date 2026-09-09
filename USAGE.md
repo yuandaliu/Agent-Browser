@@ -103,10 +103,11 @@ flowchart LR
 ## 场景四：测试与验证
 
 ```bash
-npm test                 # 单元测试（vitest，44 项，无需服务）
-node tests/e2e-probe.mjs # 页面探测：加载按钮 / WebGPU / 控制台零报错
+npm test                 # 单元测试（vitest，76 项，无需服务）
+npm run test:probe       # 页面探测：加载按钮 / WebGPU / 控制台零报错（无需加载模型）
 npm run test:e2e         # 完整 E2E 验收（需 proxy + dev 已启动，Playwright + 系统 Chrome）
 npm run test:embed       # 嵌入示例验证（需 proxy + dev 已启动）
+npm run test:search      # 智能搜索页（仿百度 + 悬浮球聊天弹窗）验证（需 proxy + dev 已启动）
 ```
 
 > 手动验收清单（含部署验证步骤）见 `VERIFICATION.md`，可逐项勾选。
@@ -122,8 +123,11 @@ npm run test:embed       # 嵌入示例验证（需 proxy + dev 已启动）
 | `npm run build` | 构建应用产物（dist/） |
 | `npm run build:embed` | 构建嵌入单文件产物（dist-embed/） |
 | `npm test` | 单元测试 |
-| `npm run test:e2e` | E2E 验收测试 |
+| `npm run test:coverage` | 单元测试 + 覆盖率报告 |
+| `npm run test:probe` | 页面探测：加载按钮 / WebGPU / 控制台零报错 |
+| `npm run test:e2e` | 完整 E2E 验收测试 |
 | `npm run test:embed` | 嵌入示例验证 |
+| `npm run test:search` | 智能搜索页验证 |
 
 ---
 
@@ -132,7 +136,8 @@ npm run test:embed       # 嵌入示例验证（需 proxy + dev 已启动）
 | 问题 | 处理 |
 | --- | --- |
 | 徽章显示 `WebGPU ✗` | 更新浏览器、开启硬件加速、更新显卡驱动 |
-| 进度条长时间不动 | hf-mirror 偶发超时，代理内置重试；点「重试加载」 |
-| 提示 Proxy Worker 未激活 | 确认 `npm run proxy` 已启动、8787 未被占用 |
+| 进度条长时间不动 | hf-mirror 偶发超时。`dev-proxy` 已内置 **3 次重试**（每次间隔 500ms，总耗时 ≤ 1.5s），无需手动操作；若仍失败，查看代理终端是否有 `dev-proxy upstream error` 日志，再点「重试加载」 |
+| 提示 Proxy Worker 未激活 | 确认 `npm run proxy` 已启动、8787 未被占用；首次启动需等几秒（健康检查端点 `/__worker-health`） |
 | 端口被占用（5189/8787） | 关闭残留 node 进程后重启：`Get-Process node | Stop-Process`（Windows） |
-| 模型答非所问 / 不调工具 | 1B 模型能力有限，可重试提问或换 2B/4B 模型 |
+| 模型答非所问 / 不调工具 | 1B 模型能力有限属预期。可换 2B/4B 模型（在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 中扩展）；或在 `src/agentLoop.js` 调高 `MAX_STEPS` 允许多轮试错 |
+| 公网部署代理被刷流量 | 设置环境变量 `PROXY_TOKEN=xxx` 开启令牌校验，所有请求必须带 `X-Proxy-Token: xxx` 头或 `?token=xxx` 查询参数（详见 `server/dev-proxy.mjs` 顶部注释） |

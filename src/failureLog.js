@@ -120,8 +120,5 @@ export function getFailureLog() {
   if (!singleton) singleton = new FailureLog();
   return singleton;
 }
-export function resetFailureLogSingleton() {
-  singleton = null;
-}
 
 export { STORAGE_KEY, MAX_FAILURES };

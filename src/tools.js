@@ -51,9 +51,7 @@ function tokenize(expr) {
       }
       if (j - i > MAX_NUMBER_LENGTH) throw new ExpressionError("数字过长");
       const num = normalized.slice(i, j);
-      if (num === "." || num.endsWith(".") || num.startsWith(".")) {
-        // 允许 .5 / 5. 之类的写法，但规范化为数字
-      }
+      // 允许 .5 / 5. 之类的写法（Number("."), Number("5."), Number(".5") 都能规范化为有效数字）
       tokens.push({ type: "num", value: Number(num) });
       i = j;
       continue;
@@ -332,14 +330,7 @@ const TOOLS = {
   },
 };
 
-/** 对外暴露的 schema 表（保持向后兼容） */
-export const TOOL_SCHEMAS = Object.fromEntries(
-  Object.entries(TOOLS).map(([name, { description, parameters }]) => [
-    name,
-    { description, parameters, requiresContext: false },
-  ]),
-);
-
+/** 工具名称列表（agentLoop 用 TOOL_NAMES.includes() 校验，避免解析时调用未注册工具） */
 export const TOOL_NAMES = Object.keys(TOOLS);
 
 /** 生成 ReAct 系统提示词中的工具说明 */

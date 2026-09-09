@@ -227,18 +227,12 @@ export class MemoryStore {
 }
 
 // ---------------------------------------------------------------------------
-// 便捷单例（浏览器环境）
+// 模块级 helper：纯逻辑（无需单例 / 浏览器初始化）
 // ---------------------------------------------------------------------------
-
-let singleton = null;
-export async function getMemoryStore() {
-  if (!singleton) {
-    singleton = new MemoryStore();
-    await singleton.init();
-  }
-  return singleton;
-}
-
-export function resetMemorySingleton() {
-  singleton = null;
-}
+// 注：早期版本提供过 getMemoryStore() / resetMemorySingleton() 单例 helper，
+// 但所有调用方（main.js 等）已改用 createLocalAgent().getMemories() 等封装接口。
+// 单例模式反而引入"跨实例状态污染"风险，已移除。如需直接访问 store：
+//   import { MemoryStore } from "./memory.js";
+//   const store = new MemoryStore();
+//   await store.init();
+// ---------------------------------------------------------------------------
