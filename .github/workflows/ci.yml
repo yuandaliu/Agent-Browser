@@ -1,10 +1,13 @@
 name: CI
 
+# 默认不自动执行：仅保留手动触发（Actions 页面点 "Run workflow"）。
+# 需要恢复自动触发时，取消下面 push / pull_request 的注释即可。
 on:
-  push:
-    branches: [master, main]
-  pull_request:
-    branches: [master, main]
+  workflow_dispatch:
+  # push:
+  #   branches: [master, main]
+  # pull_request:
+  #   branches: [master, main]
 
 # 同一个分支的最新 run 会取消上一次 in-progress 的 run，节省 CI 分钟
 concurrency:
