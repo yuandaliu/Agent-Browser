@@ -1,8 +1,7 @@
 # 📖 使用流程（总览）
 
 本文档串联项目的全部使用路径。详细说明分别见：
-[README.md](README.md)（架构/快速开始）· [VERIFICATION.md](VERIFICATION.md)（验收清单）·
-[INTEGRATION.md](INTEGRATION.md)（嵌入指南）。
+[README.md](README.md)（架构/快速开始）· [INTEGRATION.md](INTEGRATION.md)（嵌入指南）。
 
 ---
 
@@ -109,8 +108,6 @@ npm run test:e2e         # 完整 E2E 验收（需 proxy + dev 已启动，Playw
 npm run test:embed       # 嵌入示例验证（需 proxy + dev 已启动）
 npm run test:search      # 智能搜索页（仿百度 + 悬浮球聊天弹窗）验证（需 proxy + dev 已启动）
 ```
-
-> 手动验收清单（含部署验证步骤）见 `VERIFICATION.md`，可逐项勾选。
 
 ---
 

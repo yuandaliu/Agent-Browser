@@ -119,7 +119,7 @@ const agent = createLocalAgent({ modelId: "Qwen2.5-3B-Instruct-q4f16_1-MLC" });
 
 ### Step 6 · 验证
 - 自动化：本仓库 `npm run test:embed`（需先起 proxy 与 dev）验证完整浮窗示例；
-- 手动：按 `VERIFICATION.md` 的「Phase 3/4」用例逐条检查（时间、计算、记忆）；
+- 手动：在页面对话框依次验证时间、计算、记忆三类问题，逐条核对结果；
 - 网络：浏览器 F12 → Network，确认模型文件经 `/hf/...` 返回 200 且无 CORS 报错。
 
 ### Step 7 · 上线检查清单
