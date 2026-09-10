@@ -16,7 +16,8 @@
     "test:e2e": "node tests/e2e.mjs",
     "test:probe": "node tests/e2e-probe.mjs",
     "test:embed": "node tests/e2e-embed-probe.mjs",
-    "test:search": "node tests/e2e-search-probe.mjs"
+    "test:search": "node tests/e2e-search-probe.mjs",
+    "test:offline": "node tests/e2e-offline.mjs"
   },
   "dependencies": {
     "@missionsquad/browserai": "^0.1.0"

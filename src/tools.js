@@ -241,6 +241,12 @@ const TOOLS = {
   get_current_time: {
     description: "获取当前日期和时间（本地时区）。无需参数。",
     parameters: {},
+    parametersSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+      description: "获取当前日期和时间（本地时区）。无需参数。",
+    },
     handler: () => {
       const now = new Date();
       const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
@@ -256,6 +262,15 @@ const TOOLS = {
   calculate: {
     description: "执行数学计算。支持 + - * / 和括号，例如 12+34、45*67。传入 expression 参数。",
     parameters: { expression: "要计算的数学表达式字符串，如 \"12+34\"" },
+    parametersSchema: {
+      type: "object",
+      properties: {
+        expression: { type: "string", description: "要计算的数学表达式字符串，如 \"12+34\"" },
+      },
+      required: ["expression"],
+      additionalProperties: false,
+      description: "执行数学计算。",
+    },
     handler: (input, _ctx, { arg, rawInput }) => {
       const expression = arg("expression") ?? rawInput;
       if (typeof expression !== "string" || !expression.trim()) {
@@ -273,6 +288,15 @@ const TOOLS = {
   web_search: {
     description: "在网络上搜索信息。传入 query 参数。",
     parameters: { query: "搜索关键词" },
+    parametersSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "搜索关键词" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+      description: "在网络上搜索信息。",
+    },
     handler: (input, _ctx, { arg, rawInput }) => {
       const query = arg("query") ?? rawInput;
       if (!query) return "搜索失败：缺少 query 参数";
@@ -284,6 +308,14 @@ const TOOLS = {
     description:
       "读取当前嵌入页面（宿主网页）的实时内容，包括页面标题、网址与正文文本。不传 selector 时自动提取整个页面的正文内容（推荐用法，大多数情况直接这样调用）；可选 selector 参数只读取指定区域。当用户询问当前页面的内容、总结页面、或问题与当前页面有关时使用。",
     parameters: { selector: "CSS 选择器（可选，一般不传）" },
+    parametersSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS 选择器（可选，一般不传）" },
+      },
+      additionalProperties: false,
+      description: "读取当前嵌入页面的实时内容。",
+    },
     handler: (input, _ctx, { arg, rawInput }) => {
       const selector = arg("selector") ?? rawInput;
       const snapshot = getPageSnapshot(
@@ -299,6 +331,16 @@ const TOOLS = {
   save_memory: {
     description: "记住用户告知的重要事实（如名字、偏好）。传入 key 和 value 参数。",
     parameters: { key: "记忆键名（如 name、preference）", value: "记忆内容（如 小明、喜欢咖啡）" },
+    parametersSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "记忆键名（如 name、preference）" },
+        value: { type: "string", description: "记忆内容（如 小明、喜欢咖啡）" },
+      },
+      required: ["key", "value"],
+      additionalProperties: false,
+      description: "记住用户告知的重要事实。",
+    },
     handler: (input, ctx, { arg }) => {
       const key = arg("key") ?? input?.key;
       const value = arg("value") ?? input?.value;
@@ -315,6 +357,14 @@ const TOOLS = {
     description:
       "回忆此前记住的事实（用户主动告知并保存的名字、偏好、城市等）。传入 query 参数。注意：本工具只用于回忆已保存的记忆，不读取网页内容；若用户询问的是当前页面内容，请使用 read_page_content 工具。",
     parameters: { query: "要回忆的关键词" },
+    parametersSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "要回忆的关键词" },
+      },
+      additionalProperties: false,
+      description: "回忆此前记住的事实。",
+    },
     handler: async (input, ctx, { arg, rawInput }) => {
       const query = arg("query") ?? rawInput;
       if (!ctx.memory) return "记忆失败：记忆系统不可用";
@@ -333,7 +383,11 @@ const TOOLS = {
 /** 工具名称列表（agentLoop 用 TOOL_NAMES.includes() 校验，避免解析时调用未注册工具） */
 export const TOOL_NAMES = Object.keys(TOOLS);
 
-/** 生成 ReAct 系统提示词中的工具说明 */
+/**
+ * 生成 ReAct 系统提示词中的工具说明。
+ * 若工具定义了 parametersSchema（JSON Schema 形态），额外附 schema 提示，
+ * 提升 1B/3B 模型对工具入参结构的理解。
+ */
 export function toolsDescription() {
   return TOOL_NAMES.map((name) => {
     const t = TOOLS[name];
@@ -341,22 +395,49 @@ export function toolsDescription() {
     const paramStr = params.length
       ? ` 参数: ${params.map(([k, v]) => `"${k}": ${v}`).join(", ")}`
       : "";
-    return `- ${name}: ${t.description}${paramStr}`;
+    let schemaHint = "";
+    if (t.parametersSchema?.required?.length) {
+      schemaHint = ` (必填: ${t.parametersSchema.required.join(", ")})`;
+    }
+    return `- ${name}: ${t.description}${paramStr}${schemaHint}`;
   }).join("\n");
 }
 
 /**
  * 执行工具。ctx 提供记忆 store。返回字符串形式的观察结果。
  * 任何异常都会转成可读的错误消息（绝不向模型抛出 JS 异常）。
+ *
+ * 性能埋点：返回对象 { text, durationMs, ok, errorMessage }，让 agentLoop 能统计
+ * 每个工具的耗时与失败率。向后兼容：旧代码仍可拿到字符串（自动 toString()）。
+ *
+ * @returns {Promise<string|{text:string, durationMs:number, ok:boolean, errorMessage?:string}>}
  */
 export async function runTool(name, input, ctx = {}) {
   const tool = TOOLS[name];
-  if (!tool) return `未知工具：${name}`;
+  const startedAt = performance.now();
+  if (!tool) {
+    return {
+      text: `未知工具：${name}`,
+      durationMs: 0,
+      ok: false,
+      errorMessage: "unknown_tool",
+    };
+  }
   const arg = (key) => (input && typeof input === "object" ? input[key] : undefined);
   const rawInput = (typeof input === "string" ? input : arg("input")) ?? undefined;
   try {
-    return await tool.handler(input, ctx, { arg, rawInput });
+    const result = await tool.handler(input, ctx, { arg, rawInput });
+    return {
+      text: result,
+      durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+      ok: true,
+    };
   } catch (err) {
-    return `工具执行出错: ${err?.message ?? err}`;
+    return {
+      text: `工具执行出错: ${err?.message ?? err}`,
+      durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+      ok: false,
+      errorMessage: err?.message ?? String(err),
+    };
   }
 }

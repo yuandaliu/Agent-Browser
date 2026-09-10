@@ -128,6 +128,7 @@ npm run test:search      # 智能搜索页（仿百度 + 悬浮球聊天弹窗�
 | `npm run test:e2e` | 完整 E2E 验收测试 |
 | `npm run test:embed` | 嵌入示例验证 |
 | `npm run test:search` | 智能搜索页验证 |
+| `npm run test:offline` | Service Worker 离线缓存 E2E（Playwright） |
 
 ---
 
@@ -141,3 +142,4 @@ npm run test:search      # 智能搜索页（仿百度 + 悬浮球聊天弹窗�
 | 端口被占用（5189/8787） | 关闭残留 node 进程后重启：`Get-Process node | Stop-Process`（Windows） |
 | 模型答非所问 / 不调工具 | 1B 模型能力有限属预期。可换 2B/4B 模型（在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 中扩展）；或在 `src/agentLoop.js` 调高 `MAX_STEPS` 允许多轮试错 |
 | 公网部署代理被刷流量 | 设置环境变量 `PROXY_TOKEN=xxx` 开启令牌校验，所有请求必须带 `X-Proxy-Token: xxx` 头或 `?token=xxx` 查询参数（详见 `server/dev-proxy.mjs` 顶部注释） |
+| 离线刷新后页面空白 | Service Worker 注册失败（iframe 嵌入 / 非 HTTPS / SW 路径错误）。DevTools → Application → Service Workers 查看注册状态；首次注册后需**刷新一次**才能完全接管请求 |

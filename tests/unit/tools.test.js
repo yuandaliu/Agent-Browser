@@ -61,26 +61,29 @@ describe("safeEvaluate — 安全计算器", () => {
 });
 
 describe("runTool — 工具执行", () => {
+  // 新版 runTool 返回 { text, durationMs, ok, errorMessage? }，这里用 .text 解包便于断言
+
   it("get_current_time 返回包含日期时间的结果", async () => {
     const result = await runTool("get_current_time", {});
-    expect(result).toMatch(/当前时间|时间/);
-    expect(result).toMatch(/\d{4}年/);
-    expect(result).toMatch(/\d{2}:\d{2}/);
+    expect(result.text).toMatch(/当前时间|时间/);
+    expect(result.text).toMatch(/\d{4}年/);
+    expect(result.text).toMatch(/\d{2}:\d{2}/);
   });
 
   it("calculate 正常计算", async () => {
     const result = await runTool("calculate", { expression: "12*34" });
-    expect(result).toBe("12*34 = 408");
+    expect(result.text).toBe("12*34 = 408");
   });
 
   it("calculate 缺少参数时给出友好提示", async () => {
     const result = await runTool("calculate", {});
-    expect(result).toContain("计算失败");
+    expect(result.text).toContain("计算失败");
   });
 
   it("未知工具返回错误消息而非抛异常", async () => {
     const result = await runTool("not_a_tool", {});
-    expect(result).toContain("未知工具");
+    expect(result.text).toContain("未知工具");
+    expect(result.ok).toBe(false);
   });
 
   it("save_memory / recall_memory 使用注入的记忆 store", async () => {
@@ -89,13 +92,12 @@ describe("runTool — 工具执行", () => {
       recall: async (q) => (q === "名字" ? [{ key: "name", value: "小明" }] : []),
     };
     const saved = await runTool("save_memory", { key: "name", value: "小明" }, { memory: store });
-    expect(saved).toContain("已记住");
+    expect(saved.text).toContain("已记住");
     const recalled = await runTool("recall_memory", { query: "名字" }, { memory: store });
-    expect(recalled).toContain("小明");
+    expect(recalled.text).toContain("小明");
     const none = await runTool("recall_memory", { query: "不存在" }, { memory: store });
-    expect(none).toContain("没有找到相关记忆");
-    // 无结果时给出换工具引导（页面内容类问题 → read_page_content）
-    expect(none).toContain("read_page_content");
+    expect(none.text).toContain("没有找到相关记忆");
+    expect(none.text).toContain("read_page_content");
   });
 
   it("工具注册表覆盖验收所需工具", () => {
@@ -109,7 +111,32 @@ describe("runTool — 工具执行", () => {
 
   it("read_page_content 在非浏览器环境返回可读错误（Node 单元测试环境）", async () => {
     const result = await runTool("read_page_content", {});
-    expect(result).toContain("读取失败");
-    expect(result).toContain("浏览器页面环境");
+    expect(result.text).toContain("读取失败");
+    expect(result.text).toContain("浏览器页面环境");
+  });
+});
+
+describe("runTool — 计时与可观测性", () => {
+  it("成功执行返回 { text, durationMs, ok: true }", async () => {
+    const result = await runTool("calculate", { expression: "2+2" });
+    expect(result.ok).toBe(true);
+    expect(result.errorMessage).toBeUndefined();
+    expect(typeof result.durationMs).toBe("number");
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("未知工具返回 { text, durationMs: 0, ok: false, errorMessage }", async () => {
+    const result = await runTool("not_a_tool", {});
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toBe("unknown_tool");
+    expect(result.durationMs).toBe(0);
+  });
+
+  it("工具 handler 抛错被捕获，返回 ok: false + errorMessage", async () => {
+    // 通过 save_memory 缺 ctx.memory 触发
+    const result = await runTool("save_memory", { key: "x", value: "y" });
+    expect(result.ok).toBe(false);
+    expect(typeof result.errorMessage).toBe("string");
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
   });
 });

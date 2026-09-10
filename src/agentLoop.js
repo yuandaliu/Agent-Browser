@@ -16,6 +16,7 @@
 
 import { runTool, TOOL_NAMES, toolsDescription } from "./tools.js";
 import { budgetMemoryContext, budgetObservation, budgetHistory } from "./contextBudget.js";
+import { validateToolInput } from "./toolSchemas.js";
 
 export const MAX_STEPS = 5;
 export const MAX_HISTORY_MESSAGES = 8; // 送入模型的最近对话条数
@@ -239,15 +240,31 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
       return { answer: "（已中止）", rawTexts, steps, ok: false, reason: "aborted" };
     }
     let text;
+    const stepStartedAt = performance.now();
+    let firstTokenAt = null;
     try {
       const result = await generate(messages, {
-        onDelta: (full) => emit({ type: "stream", text: full }),
+        onDelta: (full) => {
+          if (firstTokenAt === null) firstTokenAt = performance.now();
+          emit({ type: "stream", text: full });
+        },
         signal,
       });
       text = result.text ?? "";
     } catch (err) {
+      // 关键改动：识别 AbortError（SDK 在 abort 时可能抛）或 signal 已 abort，
+      // 标记 reason 为 "aborted" 而非 "error"（避免把用户主动中止当成生成失败）
+      if (err?.name === "AbortError" || signal?.aborted) {
+        emit({ type: "error", message: "用户已中止对话" });
+        return { answer: "（已中止）", rawTexts, steps, ok: false, reason: "aborted" };
+      }
       emit({ type: "error", message: `模型生成失败: ${err?.message ?? err}` });
       return { answer: `抱歉，模型生成时出错：${err?.message ?? err}`, rawTexts, steps, ok: false, reason: "error" };
+    }
+    const stepDurationMs = Math.round((performance.now() - stepStartedAt) * 100) / 100;
+    if (firstTokenAt !== null) {
+      const ttft = Math.round((firstTokenAt - stepStartedAt) * 100) / 100;
+      emit({ type: "ttft", durationMs: ttft, stepDurationMs, textLength: text.length });
     }
     rawTexts.push(text);
 
@@ -272,13 +289,44 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
         return { answer, rawTexts, steps, ok: false, reason: "loop" };
       }
 
-      let result;
-      try {
-        result = await runTool(parsed.name, parsed.input, { memory });
-        emit({ type: "observation", name: parsed.name, result });
-      } catch (err) {
-        result = `工具执行出错: ${err?.message ?? err}`;
-        emit({ type: "observation", name: parsed.name, result, error: true });
+      // 集中校验工具参数（结构层）：必填字段、类型、additionalProperties。
+      // 之前校验分散在 handler 里，容易遗漏；这里做"边界拦截"，
+      // 把"字段缺失 / 类型错误"在调用 runTool 前就转成可读 observation 反馈给模型。
+      const validation = validateToolInput(parsed.name, parsed.input);
+      if (!validation.ok) {
+        const errMsg = `工具参数校验失败: ${validation.error}。请按工具说明重新调用。`;
+        result = errMsg;
+        emit({
+          type: "observation",
+          name: parsed.name,
+          result: errMsg,
+          ok: false,
+          errorMessage: validation.error,
+        });
+      } else {
+        let toolResult;
+        try {
+          toolResult = await runTool(parsed.name, parsed.input, { memory });
+          // runTool 现在返回 {text, durationMs, ok, errorMessage}，解包出 text 用于后续拼接
+          // 仍向后兼容：如果返回的是字符串（旧调用方），保持原行为
+          if (typeof toolResult === "string") {
+            result = toolResult;
+            emit({ type: "observation", name: parsed.name, result });
+          } else {
+            result = toolResult.text;
+            emit({
+              type: "observation",
+              name: parsed.name,
+              result,
+              durationMs: toolResult.durationMs,
+              ok: toolResult.ok,
+              errorMessage: toolResult.errorMessage,
+            });
+          }
+        } catch (err) {
+          result = `工具执行出错: ${err?.message ?? err}`;
+          emit({ type: "observation", name: parsed.name, result, error: true });
+        }
       }
 
       // 连续第 2 次调用同一工具（count === 1）：在观察中注入换工具引导，给模型纠错机会

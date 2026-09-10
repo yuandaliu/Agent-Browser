@@ -102,7 +102,7 @@ server/dev-proxy.mjs    本地模型代理：/hf* → hf-mirror.com，/gh-raw* �
 ## 🧪 测试
 
 ```bash
-npm test                # 单元测试（vitest，44 项）：解析器、计算器、工具、记忆
+npm test                # 单元测试（vitest，141 项）：解析器、计算器、工具、记忆、页面读取、失败日志、dev-proxy、模型自适应、SW策略、JSON Schema
 npm run test:e2e        # E2E 验收（Playwright + 系统 Chrome + WebGPU，需先启动 proxy 与 dev）
 node tests/e2e-probe.mjs  # 快速探测：页面 / WebGPU / 控制台
 ```
@@ -134,18 +134,109 @@ npm run build           # 产出 dist/
 > 沦为开放镜像中转站，带来流量成本与合规风险。此外模型权重来自 hf-mirror 等第三方镜像，
 > 属供应链信任范畴，请知悉。
 
+## 📡 离线缓存（Service Worker）
+
+`createLocalAgent()` 在 `ready()` 内部会自动注册 `public/sw.js`（best-effort，失败仅 console.warn 不阻断主流程）。注册成功后：
+
+| 资源类型 | 缓存策略 | 缓存名 | 原因 |
+| --- | --- | --- | --- |
+| 模型权重 `/hf/*` `/hf-transformers/*` `/gh-raw/*` | cache-first | `local-agent-models-v1` | 权重不变，命中即用 |
+| 应用 chunks `/assets/*` `/dist-embed/*` `local-agent.esm.js` | stale-while-revalidate | `local-agent-app-v1` | vite hash 文件名更新时自动切到新版 |
+| 导航请求（HTML） | network-first + cache fallback | `local-agent-app-v1` | 避免 stale SW 卡住；离线时降级到 `/index.html` |
+| 跨域请求 | 不拦截 | — | 让浏览器原生处理 |
+
+**效果**：首次加载完成后，**断网 / 跨页面**仍能秒开；模型权重缓存在用户磁盘上，IndexedDB 臃肿问题得到缓解。
+
+**开发验证**：
+```bash
+# 先启动 proxy + dev
+npm run proxy & npm run dev &
+# 跑离线测试（Playwright）
+npm run test:offline
+```
+
+**清除缓存**：DevTools → Application → Storage → Clear site data；或宿主调用 `caches.delete("local-agent-models-v1")`。
+
+**生产环境要求**：HTTPS（localhost 除外）。iframe 嵌入场景 SW 注册可能被宿主页面限制，详见 [INTEGRATION.md](INTEGRATION.md)。
+
 ## 🧩 可选：更换模型
 
-页面左侧下拉可选 3 个模型，默认 **Qwen3.5 0.8B**（低门槛，官方推荐）：
+页面左侧下拉可选 5 个模型档位。**默认 `modelId: "auto"`**——`ready()` 会自动探测硬件（WebGPU + 处理器核心数）并推荐最适合的档位，下拉自动切到推荐项并在标题显示原因。仍可在下拉里手动覆盖。
 
-| 模型 ID | 下载 / 显存 |
-| --- | --- |
-| `Qwen3.5-0.8B-q4f16_1-MLC`（默认） | ~447MB / 1.6GB |
-| `Qwen/Qwen3.5-2B` ⚠️ 待实测 | ~1GB / ~2.2GB |
-| `Qwen3.5-4B-q4f16_1-MLC` | ~2.4GB / ~3.8GB |
+| 模型 ID | 档位 | 下载 / 显存 | 适用设备 | 推荐 |
+| --- | --- | --- | --- | --- |
+| `Qwen3.5-0.8B-q4f16_1-MLC` | low | ~447MB / 1.6GB | 低端 / 无 GPU 加速 | — |
+| `Qwen2.5-1.5B-Instruct-q4f16_1-MLC` | mid | ~1.1GB / 2.5GB | 4 核、入门档 | — |
+| `Llama-3.2-3B-Instruct-q4f16_1-MLC` | **high** | ~1.8GB / 4GB | 主流 PC（4+ 核） | ⭐ **自动推荐** |
+| `Qwen2.5-3B-Instruct-q4f16_1-MLC` | high | ~1.8GB / 4GB | 中文场景更佳 | — |
+| `Qwen3.5-4B-q4f16_1-MLC` | ultra | ~2.4GB / 6GB | 高端 PC（8+ 核） | — |
 
-> ⚠️ `Qwen/Qwen3.5-2B` 的 id 格式与其他 `q4f16_1-MLC` 后缀模型不一致，MLC 后端可能无对应编译权重。
-> 首次使用前请在本地实测能否加载；若加载失败，请从 `src/modelLoader.js` 的 `MODEL_OPTIONS` 移除该选项。
+**自适应逻辑**（`src/modelLoader.js:recommendModelId(snapshot)`）：
+- 不支持 WebGPU → 最低档
+- 2 核以下 → 最低档
+- 4 核 → high（Llama 3.2 3B 推荐档）
+- 8 核及以上 → 优先 ultra，回退 high
+
+**手动覆盖**：在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 增删模型；或在宿主代码里传 `createLocalAgent({ modelId: "Qwen2.5-3B-..." })`。
+
+**新模型接入前请确认**：
+1. MLC 后端有对应编译权重（id 必须有 `q4f16_1-MLC` 等量化后缀）
+2. 在 `MODEL_OPTIONS` 里补全元数据（tier / sizeMB / minVRAMGB / minCores / description）
+3. 首次使用在本地实测可加载；若失败先从 `MODEL_OPTIONS` 移除该选项
+
+## 📊 性能与可观测性
+
+### 工具调用计时
+
+每次 `agent.chat()` 后，UI 显示每个工具的耗时与成功/失败标记（小灰字 "工具结果 · 12.5ms ✓"），控制台打印 `首 token 延迟` 与 `总耗时 / 工具调用次数`。
+
+### 性能统计 API（宿主可读取）
+
+```js
+const agent = createLocalAgent(...);
+await agent.chat("现在几点", { onStep: (s) => {/* 渲染 */} });
+
+// 累计最近 20 次 chat 的快照
+const stats = agent.getStats();
+console.log(stats);
+// {
+//   sampleCount: 5,
+//   history: [
+//     { timestamp: 1234, ok: true, reason: "success", totalDurationMs: 2340,
+//       toolCallCount: 1, toolFailures: 0, toolTotalMs: 12.5,
+//       ttftMs: 380, ttftReason: "ok", stepCount: 2 },
+//     ...
+//   ],
+//   avgTotalMs: 2100,
+//   avgToolMsPerChat: 15.3,
+//   avgToolMsPerCall: 12.5,
+//   totalToolCalls: 5,
+//   totalToolFailures: 1,
+// }
+```
+
+### JSON Schema 工具定义（原生 function calling）
+
+每个工具的 `parametersSchema` 在 `src/tools.js` 的 TOOLS 注册表中维护（单一数据源），由 `src/toolSchemas.js` 派生：
+
+```js
+import { getToolJsonSchema, getOpenAIToolsFormat, validateToolInput } from "@missionsquad/browserai";
+
+// 单个工具的 JSON Schema
+getToolJsonSchema("calculate");
+// { type: "object", properties: { expression: { type: "string", ... } },
+//   required: ["expression"], additionalProperties: false, ... }
+
+// OpenAI tools 风格（直接对接 function calling）
+getOpenAIToolsFormat();
+// [{ type: "function", function: { name: "calculate", description: "...", parameters: {... } }, ...]
+
+// 输入校验（结构校验，业务合法性由 handler 自己保证）
+validateToolInput("calculate", { expression: "1+2" });
+// { ok: true }
+```
+
+**接入 SDK 原生 tool calling**（未来 WebLLM / OpenAI 客户端 SDK 直接传 `getOpenAIToolsFormat()`，模型按 JSON 格式返回，绕过 ReAct 文本解析——"答非所问"率断崖式下降）。
 
 ## 📁 目录结构
 

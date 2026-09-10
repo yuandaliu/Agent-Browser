@@ -51,15 +51,24 @@ import { createLocalAgent } from "./embed.js";
 // 方式二（产物）—— 见 Step 5 的 HTML 模板
 
 const agent = createLocalAgent({
+  // modelId 留空或传 "auto"：ready() 内部探测硬件（WebGPU + 核数），
+  // 通过 onEvent 的 "model-recommended" 事件告知推荐档位，下拉自动切到该项
+  // modelId: "auto",   // ← 默认值；可显式指定如 "Llama-3.2-3B-Instruct-q4f16_1-MLC"
   onProgress: ({ progress, status }) => {
     bar.style.width = `${Math.round(progress * 100)}%`;   // 渲染进度条
   },
   onReady: () => { sendBtn.disabled = false; },            // 解锁对话
   onError: (err) => { showError(err.message); },           // WebGPU 不支持等
+  onEvent: (e) => {
+    if (e.type === "model-recommended") {
+      // ready() 后 SDK 已自动选档，可读取 e.modelId / e.snapshot
+      console.log(`为你的设备推荐：${e.modelId}`);
+    }
+  },
 });
 
-await agent.ready();                 // ① 初始化
-loadBtn.onclick = () => agent.load();// ② 加载模型
+await agent.ready();                 // ① 初始化（同步选档）
+loadBtn.onclick = () => agent.load();// ② 加载推荐档（或下拉里手动覆盖）
 sendBtn.onclick = async () => {
   const { answer } = await agent.chat(input.value, {
     onStep: (s) => { /* action / observation / final 渲染思考过程 */ },
@@ -68,6 +77,26 @@ sendBtn.onclick = async () => {
   bubble.textContent = answer;       // ③ 渲染最终答案
 };
 ```
+
+#### 4.1 · 模型选择策略（设备自适应）
+
+默认 `modelId: "auto"`。`ready()` 完成后 SDK 会：
+
+1. 调用 `ai.probeHardware()` 拿到 WebGPU / 核数信息
+2. 根据启发式算法推荐最合适的模型档：
+   - 不支持 WebGPU → `Qwen3.5-0.8B`（最低门槛）
+   - 2 核以下 → 同上
+   - 4 核 → `Llama-3.2-3B-Instruct`（推荐档 ⭐）
+   - 8 核及以上 → 优先 `Qwen3.5-4B`，回退 3B
+3. 触发 `onEvent({ type: "model-recommended", modelId, snapshot })`
+4. 用户可从下拉里手动覆盖
+
+如果宿主想跳过自动选档，显式指定模型：
+```js
+const agent = createLocalAgent({ modelId: "Qwen2.5-3B-Instruct-q4f16_1-MLC" });
+```
+
+可用模型清单见 `src/modelLoader.js` 的 `MODEL_OPTIONS`，含元数据（tier / sizeMB / minVRAMGB / minCores / recommended）。
 
 ### Step 5 · 本地联调（方式二示例：无构建工具页面）
 把下面内容保存为 `embed-test.html`，与 `dist-embed/` 放在同一目录，用任意静态服务器打开
@@ -258,6 +287,27 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 - 首次 `load()` 需下载约 447MB 权重（Qwen3.5-0.8B），**务必把进度回调渲染出来**；
 - 权重缓存在浏览器 IndexedDB / Cache（按域名隔离），二次加载秒级；
 - 建议在 UI 上提示"首次加载较慢，之后秒开"。
+
+### 3.1. Service Worker 行为（宿主须知）
+
+`createLocalAgent()` 在 `ready()` 中会自动注册 `public/sw.js`。注册策略：
+
+| 场景 | 行为 |
+| --- | --- |
+| 正常页面（页面域与嵌入域一致） | ✅ 注册成功，断网 / 跨页面仍可用 |
+| iframe 嵌入（iframe 加载嵌入脚本） | 取决于宿主页面的 `Content-Security-Policy` / `Service-Worker-Allowed` 头，可能被拒绝 |
+| 跨源 iframe | ❌ 注册失败（浏览器安全策略） |
+| 非 HTTPS / 非 localhost | ❌ 注册失败（SW 强制 HTTPS） |
+| 浏览器不支持 SW（如早期 Safari） | 静默跳过，无任何错误 |
+
+**宿主页面想让 SW 工作**：
+- 主页面（同源直接嵌入方式）✓ 开箱即用
+- iframe 嵌入方式：宿主页面需要添加 `<iframe allow="..." sandbox="...">` 中允许 SW（多数浏览器默认就允许）
+- 跨域嵌入：需把 SW 也部署到宿主页面同源（即把 `public/sw.js` 上传到宿主站点的根路径），并修改 `src/embed.js` 的 `register("/sw.js")` 为实际路径
+
+**宿主想禁用 SW**：调用 `navigator.serviceWorker.getRegistrations()` 然后 `unregister()`；或在 `createLocalAgent()` 之前阻止 `ready()` 调用 SW 注册（fork embed.js）。
+
+**清除缓存**：宿主页面提供按钮调用 `caches.delete("local-agent-models-v1")` 让用户手动清理磁盘空间（避免权重被 IndexedDB 缓存污染浏览器）。
 
 ---
 

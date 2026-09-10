@@ -4,7 +4,7 @@
  * 重构说明：核心流程（模型加载 / ReAct 循环 / 历史保存 / 页面监听）统一收敛到
  * createLocalAgent，本文件只负责 DOM 渲染与事件绑定，消除此前与 embed.js 的双套状态机。
  */
-import { createLocalAgent, getModelOptions, getDefaultModelId } from "./embed.js";
+import { createLocalAgent, getModelOptions, getDefaultModelId, recommendModelId } from "./embed.js";
 
 // ---------------------------------------------------------------------------
 // 初始化：创建智能体实例并 ready（内部完成 IndexedDB 降级 + WebGPU 预检 + 页面监听）
@@ -39,15 +39,17 @@ const el = {
 };
 
 // ---------------------------------------------------------------------------
-// 模型下拉
+// 模型下拉（带"推荐"标注）
 // ---------------------------------------------------------------------------
 
 for (const option of getModelOptions()) {
   const opt = document.createElement("option");
   opt.value = option.id;
-  opt.textContent = option.label;
+  opt.textContent = option.recommended ? `${option.label} ⭐` : option.label;
+  opt.dataset.tier = option.tier;
   el.modelSelect.appendChild(opt);
 }
+// 默认选最低档（ready 后会改成推荐档）
 el.modelSelect.value = getDefaultModelId();
 
 // ---------------------------------------------------------------------------
@@ -65,6 +67,15 @@ function handleModelEvent(event) {
       if (!ok) {
         el.errorBox.textContent = `当前浏览器不支持 WebGPU（${event.snapshot.webgpuReason ?? "未知原因"}），无法运行本地模型。请使用最新 Chrome/Edge。`;
         el.errorBox.classList.remove("hidden");
+      }
+      break;
+    }
+    case "model-recommended": {
+      // ready() 后 SDK 推荐了适合当前硬件的模型 → 自动切下拉
+      el.modelSelect.value = event.modelId;
+      const opt = getModelOptions().find((m) => m.id === event.modelId);
+      if (opt) {
+        el.modelSelect.title = `为你的设备推荐：${opt.label}（${opt.description}）`;
       }
       break;
     }
@@ -88,8 +99,10 @@ function handleModelEvent(event) {
       el.readyBox.classList.remove("hidden");
       el.modelBadge.textContent = `已加载：${shortModelName(event.modelId)}`;
       el.modelBadge.className = "badge badge-ok";
-      el.loadBtn.textContent = "已就绪 ✓";
-      el.loadBtn.disabled = true;
+      // 关键改动：不禁用 loadBtn，让用户能从下拉切换模型后点"重新加载"
+      // （之前 disabled=true 会让用户无法换模型重新加载，是核心功能退化）
+      el.loadBtn.textContent = "重新加载";
+      el.loadBtn.disabled = false;
       el.inputBox.disabled = false;
       el.sendBtn.disabled = false;
       console.log("✅ 模型已就绪:", event.modelId); // 验收：控制台输出"模型已就绪"
@@ -98,6 +111,8 @@ function handleModelEvent(event) {
     case "error": {
       el.errorBox.textContent = event.error?.message ?? String(event.error);
       el.errorBox.classList.remove("hidden");
+      // 关键改动：模型加载失败时也要隐藏进度条（之前遗漏，导致进度条残留显示）
+      el.progressWrap.classList.add("hidden");
       el.loadBtn.textContent = "重试加载";
       el.loadBtn.disabled = false;
       break;
@@ -314,8 +329,16 @@ async function handleSend() {
         addStepLine("action", `${step.name} ${pretty}`);
         break;
       }
-      case "observation":
-        addStepLine("observation", step.result);
+      case "observation": {
+        // 性能埋点：observation 新增 durationMs / ok / errorMessage，UI 显示耗时小灰字
+        const dur = typeof step.durationMs === "number" ? `${step.durationMs}ms` : "";
+        const status = step.ok === false ? " ❌" : " ✓";
+        addStepLine("observation", `${step.result}${dur ? `  ·  ${dur}${status}` : ""}`);
+        break;
+      }
+      case "ttft":
+        // 首 token 延迟（仅打印到 console，不渲染 UI）
+        console.log(`[app] 首 token 延迟: ${step.durationMs}ms (步长 ${step.stepDurationMs}ms)`);
         break;
       case "final":
         if (stopTypewriter) stopTypewriter();
@@ -336,7 +359,13 @@ async function handleSend() {
       bubble.textContent = finalAnswer;
       bubble.classList.remove("streaming");
     }
-    console.log(`[app] 完成（${result.steps.length} 步，ok=${result.ok !== false}）：`, finalAnswer);
+    const stats = agent.getStats();
+    const latest = stats.history[stats.history.length - 1];
+    console.log(
+      `[app] 完成（${result.steps.length} 步，ok=${result.ok !== false}，` +
+      `总耗时 ${latest?.totalDurationMs ?? 0}ms，工具 ${latest?.toolCallCount ?? 0} 次）`,
+      finalAnswer,
+    );
   } catch (err) {
     const isAborted = err?.name === "AbortError" || /abort|中止/i.test(err?.message ?? "");
     console.error("[app] 对话失败:", err);
