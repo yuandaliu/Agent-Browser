@@ -34,3 +34,7 @@ yarn-error.log*
 # Misc
 *.tgz
 .vite/
+
+# Local history backup / scratch (never commit)
+.git.backup-*/
+.tmp/
