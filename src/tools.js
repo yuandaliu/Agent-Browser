@@ -237,7 +237,8 @@ export async function runWebSearch(query) {
 // 工具注册表：每个工具 = schema + handler，新增工具只需加一个对象（不再改 4 处）
 // ---------------------------------------------------------------------------
 
-const TOOLS = {
+// 导出：toolSchemas.js 的 JSON Schema 由本表派生（单一数据源，避免双源维护）
+export const TOOLS = {
   get_current_time: {
     description: "获取当前日期和时间（本地时区）。无需参数。",
     parameters: {},
@@ -347,7 +348,7 @@ const TOOLS = {
       if (!key || value === undefined) return "记忆失败：需要 key 和 value 参数";
       const validationError = validateMemoryEntry(key, value);
       if (validationError) return `记忆失败：${validationError}`;
-      if (!ctx.memory) return "记忆失败：记忆系统不可用";
+      if (!ctx.memory) throw new Error("记忆系统不可用");
       // save_memory 是异步 handler，但 registry 调用统一 await
       return ctx.memory.saveMemory(String(key), String(value)).then(() => `已记住：${key} = ${value}`);
     },
@@ -367,7 +368,7 @@ const TOOLS = {
     },
     handler: async (input, ctx, { arg, rawInput }) => {
       const query = arg("query") ?? rawInput;
-      if (!ctx.memory) return "记忆失败：记忆系统不可用";
+      if (!ctx.memory) throw new Error("记忆系统不可用");
       const memories = await ctx.memory.recall(query);
       if (memories.length === 0) {
         return (

@@ -54,10 +54,15 @@
       #la-log .steps { align-self: flex-start; width: 100%; font-size: 12px; color: #94a3b8; border: 1px dashed #334155; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
       #la-log .steps .action { color: #60a5fa; }
       #la-log .steps .observation { color: #fbbf24; }
+      /* 流式思考原文：模型输出含换行，必须保留换行与断词，否则会挤成一行 */
+      #la-log .steps .raw { color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
       #la-inputbar { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #1e293b; }
       #la-input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; resize: none; font-family: inherit; }
       #la-send { padding: 8px 14px; border: none; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
       #la-send:disabled { opacity: 0.5; cursor: not-allowed; }
+      /* 错误提示条（WebGPU 不支持 / 代理未启动 / 加载失败） */
+      #la-error { padding: 8px 12px; background: #7f1d1d; color: #fecaca; font-size: 12px; line-height: 1.6; white-space: pre-line; }
+      #la-error[hidden] { display: none; }
     </style>
   </head>
   <body>
@@ -77,7 +82,7 @@
     </div>
     <footer>© 2026 Acme. 示例页面</footer>
 
-    <!-- 聊天浮窗 -->
+    <!-- 聊天浮窗（data-local-agent-ui 会让 pageReader 读页面正文时排除自身 UI） -->
     <button id="la-fab" data-local-agent-ui title="打开本地智能体">🤖</button>
     <div id="la-panel" data-local-agent-ui>
       <div id="la-head">
@@ -95,6 +100,7 @@
         <div class="track"><div class="bar" id="la-bar"></div></div>
         <div class="meta"><span id="la-pct">0%</span><span id="la-file">准备中…</span></div>
       </div>
+      <div id="la-error" hidden></div>
       <div id="la-log">
         <div class="msg ai">你好！我是嵌入本页面的本地智能体。点击「加载模型」后即可向我提问（如：现在几点 / 12*34 等于多少）。</div>
       </div>
@@ -104,47 +110,111 @@
       </div>
     </div>
 
-    <!-- 方式一（推荐，开发期）：直接 import 源码模块，由构建工具打包 -->
+    <!-- 方式一（推荐，开发期）：直接 import 源码模块，由 dev server / 构建工具打包 -->
     <script type="module">
       import { createLocalAgent, getModelOptions, getDefaultModelId } from "/src/embed.js";
 
+      // ---------- DOM 引用 ----------
+      const el = {
+        bar: document.getElementById("la-bar"),
+        pct: document.getElementById("la-pct"),
+        file: document.getElementById("la-file"),
+        status: document.getElementById("la-status"),
+        progressWrap: document.getElementById("la-progress-wrap"),
+        errorBox: document.getElementById("la-error"),
+        loadBtn: document.getElementById("la-load"),
+        modelSelect: document.getElementById("la-model"),
+        input: document.getElementById("la-input"),
+        sendBtn: document.getElementById("la-send"),
+      };
+
+      function showError(message) {
+        let text = message;
+        // 首次加载模型需要下载代理；失败时给出可操作提示（宿主可按自己的文案调整）
+        if (/proxy|Failed to fetch|NetworkError|404|ERR_/i.test(message)) {
+          text += "\n提示：请先启动模型下载代理（新开终端执行 npm run proxy），再启动 npm run dev。";
+        } else if (/WebGPU|不支持/i.test(message)) {
+          text += "\n提示：请使用最新版 Chrome / Edge（chrome://gpu 可查看 WebGPU 状态）。";
+        }
+        el.errorBox.textContent = text;
+        el.errorBox.hidden = false;
+      }
+
       // ---------- 初始化智能体 ----------
+      // modelId 默认 "auto"：ready() 探测硬件（WebGPU + 核数）后通过 onEvent 的
+      // "model-recommended" 事件告知推荐档，下拉自动切到该项（详见 INTEGRATION.md Step 4）
+      let maxProgress = 0;
+      let userPickedModel = false;
+
       const agent = createLocalAgent({
-        onProgress: ({ progress, status, file }) => {
-          const pct = Math.round(progress * 100);
-          document.getElementById("la-bar").style.width = `${pct}%`;
-          document.getElementById("la-pct").textContent = `${pct}%`;
-          if (file) document.getElementById("la-file").textContent = file;
-          else if (status) document.getElementById("la-file").textContent = status;
-        },
-        onStatus: (message) => {
-          document.getElementById("la-status").textContent = message;
-        },
-        onReady: ({ modelId }) => {
-          document.getElementById("la-status").textContent = "已就绪 ✓";
-          document.getElementById("la-load").textContent = "已就绪 ✓";
-          document.getElementById("la-load").disabled = true;
-          document.getElementById("la-input").disabled = false;
-          document.getElementById("la-send").disabled = false;
-          console.log("✅ 模型已就绪（嵌入 demo）:", modelId);
-        },
-        onError: (error) => {
-          document.getElementById("la-status").textContent = "加载失败";
-          document.getElementById("la-load").textContent = "重试加载";
-          document.getElementById("la-load").disabled = false;
-          console.error("加载失败:", error);
+        onEvent: (event) => {
+          switch (event.type) {
+            case "hardware": {
+              if (!event.snapshot.webgpuSupported) {
+                showError(
+                  `当前浏览器不支持 WebGPU（${event.snapshot.webgpuReason ?? "未知原因"}），无法运行本地模型。`,
+                );
+              }
+              break;
+            }
+            case "model-recommended": {
+              // 硬件推荐档 → 自动切下拉；用户手动改过就不再覆盖
+              if (!userPickedModel) el.modelSelect.value = event.modelId;
+              const opt = getModelOptions().find((m) => m.id === event.modelId);
+              el.modelSelect.title = opt ? `为你的设备推荐：${opt.label}` : "";
+              break;
+            }
+            case "progress": {
+              const pct = Math.round((event.progress ?? 0) * 100);
+              // 进度可能回退（分片下载），取峰值避免进度条来回跳动
+              maxProgress = Math.max(maxProgress, pct);
+              el.bar.style.width = `${maxProgress}%`;
+              el.pct.textContent = `${maxProgress}%`;
+              if (event.file) el.file.textContent = event.file;
+              else if (event.status) el.file.textContent = event.status;
+              break;
+            }
+            case "status":
+              el.status.textContent = event.message;
+              break;
+            case "ready":
+              el.bar.style.width = "100%";
+              el.pct.textContent = "100%";
+              el.file.textContent = "加载完成";
+              el.status.textContent = "已就绪 ✓";
+              el.errorBox.hidden = true;
+              el.errorBox.textContent = "";
+              // 不禁用按钮：用户可从下拉换档后点「重新加载」（与 src/main.js 一致）
+              el.loadBtn.textContent = "重新加载";
+              el.loadBtn.disabled = false;
+              el.input.disabled = false;
+              el.sendBtn.disabled = false;
+              console.log("✅ 模型已就绪（嵌入 demo）:", event.modelId);
+              break;
+            case "error":
+              showError(event.error?.message ?? String(event.error));
+              // 失败时收起进度条，避免残留显示（与 src/main.js 一致）
+              el.progressWrap.style.display = "none";
+              el.loadBtn.textContent = "重试加载";
+              el.loadBtn.disabled = false;
+              break;
+          }
         },
       });
 
-      // ---------- 模型下拉 ----------
-      const select = document.getElementById("la-model");
+      // ---------- 模型下拉（带 ⭐ 推荐标注，与 src/main.js 一致） ----------
       for (const option of getModelOptions()) {
         const opt = document.createElement("option");
         opt.value = option.id;
-        opt.textContent = option.label;
-        select.appendChild(opt);
+        opt.textContent = option.recommended ? `${option.label} ⭐` : option.label;
+        opt.dataset.tier = option.tier;
+        el.modelSelect.appendChild(opt);
       }
-      select.value = getDefaultModelId();
+      // 先选最低档占位；ready() 收到 "model-recommended" 后自动切到推荐档
+      el.modelSelect.value = getDefaultModelId();
+      el.modelSelect.addEventListener("change", () => {
+        userPickedModel = true;
+      });
 
       // ---------- 浮窗开关 ----------
       const panel = document.getElementById("la-panel");
@@ -152,30 +222,36 @@
       document.getElementById("la-close").addEventListener("click", () => panel.classList.remove("open"));
 
       // ---------- 加载模型 ----------
-      document.getElementById("la-load").addEventListener("click", async () => {
-        document.getElementById("la-load").disabled = true;
-        document.getElementById("la-load").textContent = "加载中…";
-        document.getElementById("la-progress-wrap").style.display = "block";
+      el.loadBtn.addEventListener("click", async () => {
+        el.loadBtn.disabled = true;
+        el.loadBtn.textContent = "加载中…";
+        el.errorBox.hidden = true;
+        el.progressWrap.style.display = "block";
+        maxProgress = 0;
         try {
-          await agent.ready();
-          await agent.load(select.value);
+          await agent.ready(); // 幂等：初始化 IndexedDB / 事件 / 硬件探测
+          // 用户手动选过档位就尊重选择，否则传 undefined 让 embed.js 使用硬件推荐档
+          await agent.load(userPickedModel ? el.modelSelect.value : undefined);
         } catch (err) {
-          document.getElementById("la-load").disabled = false;
+          showError(err?.message ?? String(err));
+          el.progressWrap.style.display = "none";
+          el.loadBtn.textContent = "重试加载";
+          el.loadBtn.disabled = false;
         }
       });
 
       // ---------- 对话 ----------
       const log = document.getElementById("la-log");
-      const input = document.getElementById("la-input");
-      const sendBtn = document.getElementById("la-send");
+      const input = el.input;
+      const sendBtn = el.sendBtn;
 
       function addBubble(role, text) {
-        const el = document.createElement("div");
-        el.className = `msg ${role}`;
-        el.textContent = text;
-        log.appendChild(el);
+        const node = document.createElement("div");
+        node.className = `msg ${role}`;
+        node.textContent = text;
+        log.appendChild(node);
         log.scrollTop = log.scrollHeight;
-        return el;
+        return node;
       }
 
       let stepsEl = null;
@@ -201,7 +277,7 @@
         const bubble = addBubble("ai", "…");
         stepsEl = null;
         try {
-          const { answer } = await agent.chat(text, {
+          const { answer = "" } = await agent.chat(text, {
             onStep: (step) => {
               if (step.type === "action") addStep("action", `${step.name} ${JSON.stringify(step.input ?? {})}`);
               else if (step.type === "observation") addStep("observation", step.result);
@@ -218,15 +294,16 @@
               log.scrollTop = log.scrollHeight;
             },
           });
-          // 最终答案打字机渲染
+          // 最终答案打字机渲染（长文本按步长加速，避免逐字太慢）
           bubble.textContent = "";
+          const stride = Math.max(1, Math.ceil(answer.length / 120));
           let i = 0;
           const timer = setInterval(() => {
-            i++;
+            i = Math.min(answer.length, i + stride);
             bubble.textContent = answer.slice(0, i);
             log.scrollTop = log.scrollHeight;
             if (i >= answer.length) clearInterval(timer);
-          }, 10);
+          }, 16);
         } catch (err) {
           bubble.textContent = `出错了：${err.message}`;
         } finally {
@@ -241,7 +318,7 @@
 
       // ---------- 页面就绪 ----------
       await agent.ready();
-      document.getElementById("la-status").textContent = "就绪，等待加载模型";
+      el.status.textContent = "就绪，等待加载模型";
       console.log("[embed-demo] 智能体已初始化，嵌入示例运行正常");
     </script>
   </body>

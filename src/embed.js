@@ -18,7 +18,7 @@ import { MemoryStore, createMemoryAdapter } from "./memory.js";
 import { createModelLoader, getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId } from "./modelLoader.js";
 import { runAgent } from "./agentLoop.js";
 import { initPageWatcher, getPageSnapshot } from "./pageReader.js";
-import { getFailureLog } from "./failureLog.js";
+import { getFailureLog as getFailureLogSingleton } from "./failureLog.js";
 
 export { getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId, BrowserAI, getPageSnapshot, initPageWatcher };
 export { safeEvaluate } from "./tools.js";
@@ -92,7 +92,7 @@ export function createLocalAgent(options = {}) {
 
   let memory = memoryAdapter ? new MemoryStore(memoryAdapter) : new MemoryStore();
   const loader = createModelLoader({ browserAI: ai, onEvent: emit });
-  const failureLog = getFailureLog();
+  const failureLog = getFailureLogSingleton();
 
   let initialized = false;
   let initPromise = null;

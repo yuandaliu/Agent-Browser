@@ -292,6 +292,10 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
       // 集中校验工具参数（结构层）：必填字段、类型、additionalProperties。
       // 之前校验分散在 handler 里，容易遗漏；这里做"边界拦截"，
       // 把"字段缺失 / 类型错误"在调用 runTool 前就转成可读 observation 反馈给模型。
+      // 本次工具调用的观察文本：参数校验失败 / 工具 handler 成功或抛错，
+      // 三条路径都会赋值，末尾拼回消息驱动下一步。
+      // 注意：此前漏了声明，赋值命中 ESM 严格模式 → ReferenceError，工具一报错整个对话就崩。
+      let result;
       const validation = validateToolInput(parsed.name, parsed.input);
       if (!validation.ok) {
         const errMsg = `工具参数校验失败: ${validation.error}。请按工具说明重新调用。`;
