@@ -93,8 +93,9 @@ sendBtn.onclick = async () => {
 
 如果宿主想跳过自动选档，显式指定模型：
 ```js
-const agent = createLocalAgent({ modelId: "Qwen2.5-3B-Instruct-q4f16_1-MLC" });
+const agent = createLocalAgent({ modelId: "Qwen3.5-2B-q4f16_1-MLC" });
 ```
+> 传入的 id 必须存在于 SDK 模型目录（`MODEL_PRESETS`）中；失效 id 会在 `load()` 时自动降级到最低可用档并输出 console.warn。
 
 可用模型清单见 `src/modelLoader.js` 的 `MODEL_OPTIONS`，含元数据（tier / sizeMB / minVRAMGB / minCores / recommended）。
 

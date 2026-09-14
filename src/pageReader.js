@@ -159,6 +159,16 @@ export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS
 
   // 首次初始化创建 observer 与路由 patch；后续调用只增加引用计数
   if (!observer) {
+    // body 尚未就绪（脚本在 <head> 中执行，宿主页面常见）时延迟到 DOMContentLoaded
+    // 再初始化，避免 observe(null) 抛 TypeError 中断宿主页面初始化流程。
+    if (!document.body) {
+      const bootstrap = () => initPageWatcher({ debounceMs, maxChars });
+      document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+      return {
+        getSnapshot: (opts) => getPageSnapshot(opts),
+        dispose: () => document.removeEventListener("DOMContentLoaded", bootstrap),
+      };
+    }
     const scheduleRefresh = () => {
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => refreshCache(maxChars), debounceMs);

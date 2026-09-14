@@ -4,7 +4,7 @@
  * 重构说明：核心流程（模型加载 / ReAct 循环 / 历史保存 / 页面监听）统一收敛到
  * createLocalAgent，本文件只负责 DOM 渲染与事件绑定，消除此前与 embed.js 的双套状态机。
  */
-import { createLocalAgent, getModelOptions, getDefaultModelId, recommendModelId } from "./embed.js";
+import { createLocalAgent, getModelOptions, getDefaultModelId } from "./embed.js";
 
 // ---------------------------------------------------------------------------
 // 初始化：创建智能体实例并 ready（内部完成 IndexedDB 降级 + WebGPU 预检 + 页面监听）
@@ -40,9 +40,11 @@ const el = {
 
 // ---------------------------------------------------------------------------
 // 模型下拉（带"推荐"标注）
+// 用 agent.getAvailableModels()：只列出 SDK 目录中真实存在的档位，
+// 防止 MODEL_OPTIONS 与 SDK 目录脱节时出现"选中即加载失败"的选项。
 // ---------------------------------------------------------------------------
 
-for (const option of getModelOptions()) {
+for (const option of agent.getAvailableModels()) {
   const opt = document.createElement("option");
   opt.value = option.id;
   opt.textContent = option.recommended ? `${option.label} ⭐` : option.label;

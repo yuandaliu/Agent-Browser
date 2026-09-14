@@ -7,11 +7,19 @@
  *
  *   /hf/{owner}/{repo}/...            → https://hf-mirror.com/{owner}/{repo}/...
  *   /hf-transformers/{owner}/{repo}/… → https://hf-mirror.com/{owner}/{repo}/…
- *   /gh-raw/{owner}/{repo}/{branch}/… → https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/…
+ *   /gh-raw/{owner}/{repo}/{branch}/… → 多个 jsdelivr 镜像依次回退（见 GH_RAW_UPSTREAMS）
  *   /__worker-health                  → 健康检查（BrowserAI verifyProxy 使用）
+ *
+ * 为什么 gh-raw 要多上游？国内访问 cdn.jsdelivr.net 经常抽风（30s 握手都连不上），
+ * 探测就会以 502 失败。多上游 fallback 让 dev-proxy 自动换镜像继续探测。
  *
  * 用法：node server/dev-proxy.mjs [端口]   （默认 8787）
  * 页面开发时由 vite.config.js 把 /hf* /gh-raw* 等路径代理到本服务器，保持页面同源。
+ *
+ * 环境变量：
+ *   PROXY_PORT       监听端口（默认 8787）
+ *   PROXY_TOKEN      设置后所有请求必须带 X-Proxy-Token 头或 ?token= 参数
+ *   GH_RAW_UPSTREAMS 自定义 gh-raw 上游列表（空格分隔），覆盖默认 [jsdelivr, jsdmirror]
  */
 import http from "node:http";
 import https from "node:https";
@@ -23,6 +31,19 @@ const WORKER_HEADER = "browserai-proxy/dev";
 // 未设置时（本地开发）放行所有来源，保持原有行为。
 const PROXY_TOKEN = process.env.PROXY_TOKEN ?? "";
 
+// ---------- gh-raw 多上游 fallback ----------
+// 顺序尝试：cdn.jsdelivr.net → cdn.jsdmirror.com（jsdelivr 国内镜像，URL 格式完全兼容）。
+// 可通过 GH_RAW_UPSTREAMS 环境变量（空格分隔）覆盖。
+const DEFAULT_GH_RAW_UPSTREAMS = ["cdn.jsdelivr.net", "cdn.jsdmirror.com"];
+function getGhRawUpstreams() {
+  const env = process.env.GH_RAW_UPSTREAMS;
+  if (env) {
+    const list = env.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    if (list.length > 0) return list;
+  }
+  return DEFAULT_GH_RAW_UPSTREAMS;
+}
+
 function checkAccess(req, reqUrl) {
   if (!PROXY_TOKEN) return true; // 开发模式：未配置 token 即放行
   const headerToken = req.headers["x-proxy-token"] ?? "";
@@ -32,41 +53,53 @@ function checkAccess(req, reqUrl) {
 
 // ---------- 路径 → 上游 URL 的映射规则 ----------
 
-export function buildUpstreamUrl(reqUrl) {
+/**
+ * 返回一组有序的上游候选 URL（按 fallback 顺序）。
+ * 空数组表示该路径没有匹配的路由（调用方应回 404）。
+ *
+ * - /hf、/hf-transformers：单上游 hf-mirror.com
+ * - /gh-raw：多上游 fallback（见 getGhRawUpstreams()）
+ */
+export function buildUpstreamCandidates(reqUrl) {
   let pathname;
   try {
     pathname = decodeURIComponent(reqUrl.pathname);
   } catch {
-    // 非法百分号编码 → 当作无路由返回 404，而不是抛 URIError 崩进程
-    return null;
+    // 非法百分号编码 → 当作无路由返回 []，而不是抛 URIError 崩进程
+    return [];
   }
   const parts = pathname.split("/").filter(Boolean);
   const [kind, ...rest] = parts;
 
-  if (kind === "hf") {
+  if (kind === "hf" || kind === "hf-transformers") {
     // /hf/{owner}/{repo}/... → https://hf-mirror.com/{owner}/{repo}/...
-    return new URL(`https://hf-mirror.com/${rest.map(encodeURIComponent).join("/")}${reqUrl.search}`);
-  }
-  if (kind === "hf-transformers") {
-    // /hf-transformers/{owner}/{repo}/... → https://hf-mirror.com/{owner}/{repo}/...
-    return new URL(`https://hf-mirror.com/${rest.map(encodeURIComponent).join("/")}${reqUrl.search}`);
+    return [new URL(`https://hf-mirror.com/${rest.map(encodeURIComponent).join("/")}${reqUrl.search}`)];
   }
   if (kind === "gh-raw") {
-    // /gh-raw/{owner}/{repo}/{branch}/{rest} → https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{rest}
-    if (rest.length < 3) return null;
+    // /gh-raw/{owner}/{repo}/{branch}/{rest} → 多个 jsdelivr 镜像依次回退
+    if (rest.length < 3) return [];
     const [owner, repo, branch, ...fileParts] = rest;
-    return new URL(
-      `https://cdn.jsdelivr.net/gh/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}@${encodeURIComponent(branch)}/${fileParts
-        .map(encodeURIComponent)
-        .join("/")}${reqUrl.search}`,
-    );
+    const tail = `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}@${encodeURIComponent(branch)}/${fileParts
+      .map(encodeURIComponent)
+      .join("/")}${reqUrl.search}`;
+    return getGhRawUpstreams().map((host) => new URL(`https://${host}/gh/${tail}`));
   }
-  return null;
+  return [];
 }
 
-// ---------- 上游请求（带重试，hf-mirror 偶发超时） ----------
+/**
+ * 向后兼容：返回第一候选上游 URL（等价于 buildUpstreamCandidates()[0] ?? null）。
+ * 旧调用方（单元测试、外部脚本）继续可用；新逻辑请用 buildUpstreamCandidates。
+ */
+export function buildUpstreamUrl(reqUrl) {
+  const list = buildUpstreamCandidates(reqUrl);
+  return list[0] ?? null;
+}
 
-function requestUpstream(upstream, method, headers, attemptsLeft = 3) {
+// ---------- 上游请求 ----------
+
+/** 单次 HTTP 请求；timeoutMs 内未完成握手/响应即销毁。 */
+function requestOnce(upstream, method, headers, timeoutMs) {
   return new Promise((resolve, reject) => {
     const driver = upstream.protocol === "https:" ? https : http;
     const req = driver.request(
@@ -78,18 +111,75 @@ function requestUpstream(upstream, method, headers, attemptsLeft = 3) {
       },
       (res) => resolve(res),
     );
-    req.setTimeout(30000, () => {
+    req.setTimeout(timeoutMs, () => {
       req.destroy(new Error(`upstream timeout: ${upstream.host}`));
     });
     req.on("error", (err) => reject(err));
     req.end();
-  }).catch(async (err) => {
-    if (attemptsLeft > 1) {
-      await new Promise((r) => setTimeout(r, 500));
-      return requestUpstream(upstream, method, headers, attemptsLeft - 1);
-    }
-    throw err;
   });
+}
+
+/**
+ * 单上游请求：仅对网络错误（ECONNRESET / ETIMEDOUT / ENOTFOUND / socket hang up 等）
+ * 有限重试；HTTP 5xx 不在此层重试，由上层 requestUpstreamFallback 切下一个上游。
+ *
+ * 超时从原本的 30s 降到 12s：cdn.jsdelivr.net 一旦被 QoS 限速 30s 内根本连不上，
+ * 等满 30s 是浪费；宁可早切下一个上游。
+ */
+const PER_UPSTREAM_TIMEOUT_MS = 12_000;
+const PER_UPSTREAM_RETRIES = 1; // 网络错误重试次数（不含首次）
+
+async function requestUpstreamWithRetry(upstream, method, headers) {
+  let lastErr;
+  for (let attempt = 0; attempt <= PER_UPSTREAM_RETRIES; attempt++) {
+    try {
+      return await requestOnce(upstream, method, headers, PER_UPSTREAM_TIMEOUT_MS);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < PER_UPSTREAM_RETRIES) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * 多上游 fallback：依次尝试候选上游。
+ * - 网络错误 / 5xx：切下一个上游
+ * - 2xx / 3xx / 4xx：返回该响应（4xx 是客户端问题，不再切上游）
+ * 返回 { response, upstream, errors }，全失败时 errors 数组非空，抛出合并后的 Error。
+ */
+async function requestUpstreamFallback(upstreams, method, headers) {
+  const errors = [];
+  for (const upstream of upstreams) {
+    let res;
+    try {
+      res = await requestUpstreamWithRetry(upstream, method, headers);
+    } catch (err) {
+      console.error(`[dev-proxy] ${method} ${upstream.host} network error:`, err.message);
+      errors.push(`${upstream.host}: ${err.message}`);
+      continue;
+    }
+    const status = res.statusCode ?? 0;
+    if (status >= 200 && status < 500) {
+      return { response: res, upstream, errors };
+    }
+    // 5xx：读取并丢弃 body 以释放连接，再切下一个上游
+    let bodySnippet = "";
+    try {
+      const chunks = [];
+      for await (const chunk of res) chunks.push(chunk);
+      bodySnippet = Buffer.concat(chunks).toString("utf8").slice(0, 200);
+    } catch {
+      /* 释放失败不影响下一步 */
+    }
+    console.error(`[dev-proxy] ${method} ${upstream.host} -> HTTP ${status}${bodySnippet ? `: ${bodySnippet}` : ""}`);
+    errors.push(`${upstream.host}: HTTP ${status}`);
+  }
+  const err = new Error(`all upstreams failed: ${errors.join(" | ")}`);
+  err.upstreamErrors = errors;
+  throw err;
 }
 
 // ---------- 转发响应 ----------
@@ -145,8 +235,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const upstream = buildUpstreamUrl(reqUrl);
-  if (!upstream) {
+  const upstreamCandidates = buildUpstreamCandidates(reqUrl);
+  if (upstreamCandidates.length === 0) {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("dev-proxy: no route for " + reqUrl.pathname);
     return;
@@ -161,28 +251,42 @@ const server = http.createServer(async (req, res) => {
     if (req.headers.range) headers.range = req.headers.range; // 分片下载支持
     if (req.headers["if-none-match"]) headers["if-none-match"] = req.headers["if-none-match"];
 
-    const upstreamRes = await requestUpstream(upstream, req.method, headers);
-    if (upstreamRes.statusCode === 301 || upstreamRes.statusCode === 302 || upstreamRes.statusCode === 307 || upstreamRes.statusCode === 308) {
+    const { response: upstreamRes, upstream } = await requestUpstreamFallback(upstreamCandidates, req.method, headers);
+
+    // 跟随重定向（仅一次，cdn.jsdelivr.net 等常会把 /main 重定向到具体 commit）
+    if (
+      upstreamRes.statusCode === 301 ||
+      upstreamRes.statusCode === 302 ||
+      upstreamRes.statusCode === 307 ||
+      upstreamRes.statusCode === 308
+    ) {
       const location = upstreamRes.headers.location;
       if (location) {
         upstreamRes.resume();
-        // jsdelivr 等 CDN 的重定向（如 /main → 具体版本），跟随一次
         const redirected = new URL(location, upstream);
-        const retry = await requestUpstream(redirected, req.method, headers);
-        forwardHeaders(retry, res, {});
+        const retry = await requestUpstreamWithRetry(redirected, req.method, headers);
+        forwardHeaders(retry, res, { "X-Proxy-Upstream": upstream.host });
         res.writeHead(retry.statusCode ?? 200);
         retry.pipe(res);
         return;
       }
     }
 
-    forwardHeaders(upstreamRes, res, {});
+    forwardHeaders(upstreamRes, res, { "X-Proxy-Upstream": upstream.host });
+
+    // 失败响应强制 no-store：避免 Service Worker 把 502/404 等错误缓存住，
+    // 导致后续重试永远拿到同一个错误响应（曾经踩过的坑）。
+    if ((upstreamRes.statusCode ?? 0) >= 400) {
+      res.setHeader("Cache-Control", "no-store");
+    }
+
     res.writeHead(upstreamRes.statusCode ?? 200);
     upstreamRes.pipe(res);
   } catch (err) {
-    console.error(`[dev-proxy] ${req.method} ${reqUrl.pathname} -> ${upstream.href} FAILED:`, err.message);
+    console.error(`[dev-proxy] ${req.method} ${reqUrl.pathname} FAILED:`, err.message);
     if (!res.headersSent) {
       res.setHeader("X-Proxy-Worker", WORKER_HEADER);
+      res.setHeader("Cache-Control", "no-store");
       res.writeHead(502, { "Content-Type": "text/plain" });
     }
     res.end(`dev-proxy upstream error: ${err.message}`);
@@ -193,8 +297,10 @@ const server = http.createServer(async (req, res) => {
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   server.listen(PORT, () => {
+    const upstreams = getGhRawUpstreams();
     console.log(`[dev-proxy] listening on http://localhost:${PORT}`);
-    console.log(`[dev-proxy] /hf/*        -> https://hf-mirror.com/*`);
-    console.log(`[dev-proxy] /gh-raw/*    -> https://cdn.jsdelivr.net/gh/*`);
+    console.log(`[dev-proxy] /hf/*          -> https://hf-mirror.com/*`);
+    console.log(`[dev-proxy] /gh-raw/*      -> ${upstreams.map((h) => `https://${h}/gh/*`).join(" → ")}`);
+    if (upstreams.length > 1) console.log(`[dev-proxy] (gh-raw 按上述顺序自动 fallback，可通过 GH_RAW_UPSTREAMS 环境变量覆盖)`);
   });
 }

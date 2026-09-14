@@ -14,7 +14,10 @@ import {
   getDefaultModelId,
   getDefaultModelIdAsync,
   getModelOptions,
+  getAvailableModelOptions,
 } from "../../src/modelLoader.js";
+// SDK 真实模型目录（MODEL_PRESETS 由主入口 re-export，纯静态数据，Node 可直接导入）
+import { MODEL_PRESETS } from "@missionsquad/browserai";
 
 // mock navigator.hardwareConcurrency（node 环境无 navigator）
 const originalNavigator = globalThis.navigator;
@@ -60,6 +63,46 @@ describe("MODEL_OPTIONS — 模型元数据", () => {
     options1[0].label = "HACKED";
     const options2 = getModelOptions();
     expect(options2[0].label).not.toBe("HACKED");
+  });
+
+  it("MODEL_OPTIONS 的每个 id 都存在于 SDK 真实目录（MODEL_PRESETS）中", () => {
+    // 回归防护：曾出现 Qwen2.5-1.5B / Qwen2.5-3B 不在 SDK 目录、选中即 UnknownModelError 的问题。
+    // SDK 升级/换模型后若目录变化，本测试会立即暴露失效条目。
+    const catalogIds = new Set(MODEL_PRESETS.map((p) => p.id));
+    for (const opt of getModelOptions()) {
+      expect(catalogIds.has(opt.id)).toBe(true);
+    }
+  });
+});
+
+describe("getAvailableModelOptions — SDK 目录过滤", () => {
+  it("过滤掉不在 SDK 目录中的选项", () => {
+    const presets = [
+      { id: "Qwen3.5-0.8B-q4f16_1-MLC" },
+      { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC" },
+    ];
+    const available = getAvailableModelOptions(presets);
+    expect(available.map((m) => m.id)).toEqual([
+      "Qwen3.5-0.8B-q4f16_1-MLC",
+      "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+    ]);
+  });
+
+  it("presets 为空 / null 时降级返回全部选项（不阻断）", () => {
+    expect(getAvailableModelOptions([])).toEqual(getModelOptions());
+    expect(getAvailableModelOptions(null)).toEqual(getModelOptions());
+    expect(getAvailableModelOptions(undefined)).toEqual(getModelOptions());
+  });
+
+  it("目录与 MODEL_OPTIONS 完全无交集时也降级返回全部（避免空下拉）", () => {
+    const presets = [{ id: "some-unknown-model" }];
+    expect(getAvailableModelOptions(presets)).toEqual(getModelOptions());
+  });
+
+  it("返回浅拷贝（mutation 不污染内部常量）", () => {
+    const available = getAvailableModelOptions([{ id: "Qwen3.5-0.8B-q4f16_1-MLC" }]);
+    available[0].label = "HACKED";
+    expect(getModelOptions().find((m) => m.id === "Qwen3.5-0.8B-q4f16_1-MLC").label).not.toBe("HACKED");
   });
 });
 

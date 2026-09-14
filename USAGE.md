@@ -102,7 +102,7 @@ flowchart LR
 ## 场景四：测试与验证
 
 ```bash
-npm test                 # 单元测试（vitest，76 项，无需服务）
+npm test                 # 单元测试（vitest，156 项，无需服务）
 npm run test:probe       # 页面探测：加载按钮 / WebGPU / 控制台零报错（无需加载模型）
 npm run test:e2e         # 完整 E2E 验收（需 proxy + dev 已启动，Playwright + 系统 Chrome）
 npm run test:embed       # 嵌入示例验证（需 proxy + dev 已启动）

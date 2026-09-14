@@ -203,7 +203,8 @@
       });
 
       // ---------- 模型下拉（带 ⭐ 推荐标注，与 src/main.js 一致） ----------
-      for (const option of getModelOptions()) {
+      // agent.getAvailableModels()：只列出 SDK 目录中真实存在的档位，防止失效 id 出现在下拉里
+      for (const option of agent.getAvailableModels()) {
         const opt = document.createElement("option");
         opt.value = option.id;
         opt.textContent = option.recommended ? `${option.label} ⭐` : option.label;

@@ -118,6 +118,27 @@ describe("FailureLog — 失败对话持久化", () => {
     expect(entry.timestamp).toBeTypeOf("number");
   });
 
+  it("超长的 steps / rawTexts 在入库前被裁剪（localStorage 5MB 保护）", () => {
+    const big = "x".repeat(5000);
+    const entry = log.record({
+      userInput: "test",
+      ok: false,
+      reason: "loop",
+      steps: [
+        { type: "action", name: "web_search", text: big },
+        { type: "observation", name: "web_search", result: big },
+      ],
+      rawTexts: [big, big, big, big, big],
+    });
+    expect(entry).not.toBeNull();
+    // 超长字段截断到 MAX_FAILURE_TEXT（600）量级
+    expect(entry.steps[0].text.length).toBeLessThan(700);
+    expect(entry.steps[1].result.length).toBeLessThan(700);
+    // rawTexts 只保留最新 4 条，且每条被截断
+    expect(entry.rawTexts.length).toBe(4);
+    expect(entry.rawTexts[3].length).toBeLessThan(700);
+  });
+
   it("持久化到相同 STORAGE_KEY：跨实例读取", () => {
     const log1 = new FailureLog(storage);
     log1.record({ userInput: "持久化测试", ok: false, reason: "loop" });

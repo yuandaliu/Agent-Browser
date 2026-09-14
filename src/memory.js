@@ -18,6 +18,7 @@ const MESSAGES_STORE = "messages";
 const MEMORIES_STORE = "memories";
 const MAX_HISTORY = 40; // 送入模型的最近消息上限
 const MAX_STORAGE_MESSAGES = 200; // 持久化消息上限，超出自动裁剪最旧条目
+const MAX_STORAGE_MEMORIES = 100; // 长期记忆条目上限，超出自动裁剪最旧条目
 
 // ---------------------------------------------------------------------------
 // IndexedDB 适配器（浏览器）
@@ -198,7 +199,26 @@ export class MemoryStore {
   // --- 长期记忆 ---
 
   async saveMemory(key, value) {
-    return this.adapter.put(MEMORIES_STORE, { key, value, timestamp: Date.now() });
+    const record = { key, value, timestamp: Date.now() };
+    await this.adapter.put(MEMORIES_STORE, record);
+    // 总量上限：FIFO 裁剪最旧条目（fire-and-forget，裁剪失败不影响写入）
+    this.trimMemories().catch(() => {});
+    return record;
+  }
+
+  /**
+   * 超过 MAX_STORAGE_MEMORIES 时删除最旧条目。
+   * 此前 memories 无上限，条目持续累积会拖慢每轮 recall 与 system prompt 注入。
+   */
+  async trimMemories() {
+    const all = await this.getMemories();
+    if (all.length > MAX_STORAGE_MEMORIES) {
+      const sorted = [...all].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+      const toRemove = sorted.slice(0, all.length - MAX_STORAGE_MEMORIES);
+      for (const m of toRemove) {
+        await this.adapter.delete(MEMORIES_STORE, m.key);
+      }
+    }
   }
 
   async getMemories() {

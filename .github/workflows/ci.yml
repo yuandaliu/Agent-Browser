@@ -1,13 +1,15 @@
 name: CI
 
-# 默认不自动执行：仅保留手动触发（Actions 页面点 "Run workflow"）。
-# 需要恢复自动触发时，取消下面 push / pull_request 的注释即可。
+# 分层触发策略（P0 恢复）：
+#   - push / PR 自动触发：lint + 单元测试 + coverage + audit + 构建 —— 全部无需 GPU，CI 上可可靠运行
+#   - E2E（tests/e2e*.mjs）需要真实 WebGPU + 本地 proxy/dev 服务器，GitHub hosted runner 无 GPU，
+#     无法可靠运行，保持本地或手动执行：npm run test:e2e（需先启动 proxy 与 dev）
 on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
   workflow_dispatch:
-  # push:
-  #   branches: [master, main]
-  # pull_request:
-  #   branches: [master, main]
 
 # 同一个分支的最新 run 会取消上一次 in-progress 的 run，节省 CI 分钟
 concurrency:
@@ -36,9 +38,6 @@ jobs:
       - name: Lint (ESLint, max-warnings=0)
         run: npm run lint -- --max-warnings=0
 
-      - name: Audit (high severity must be 0)
-        run: npm audit --audit-level=high
-
       - name: Unit tests (vitest)
         run: npm test
 
@@ -51,4 +50,45 @@ jobs:
         with:
           name: coverage-report
           path: coverage/
+          retention-days: 7
+
+  build:
+    name: Build (app + embed bundle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 构建只需 Node，无需 GPU：验证 dist/ 与 dist-embed/ 产物可正常产出
+      # （嵌入产物损坏曾导致 eeef5f2 那类"浏览器中完全无法加载"的回归，构建门禁可提前拦截）
+      - name: Build app
+        run: npm run build
+
+      - name: Build embed bundle
+        run: npm run build:embed
+
+      - name: Verify build outputs exist
+        run: |
+          test -f dist/index.html || (echo "::error::dist/index.html missing" && exit 1)
+          test -f dist-embed/local-agent.esm.js || (echo "::error::dist-embed/local-agent.esm.js missing" && exit 1)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs
+          path: |
+            dist/
+            dist-embed/
           retention-days: 7

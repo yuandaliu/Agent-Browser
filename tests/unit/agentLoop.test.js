@@ -2,7 +2,16 @@
  * agentLoop.test.js — ReAct 解析器与循环单元测试
  */
 import { describe, it, expect } from "vitest";
-import { parseReActOutput, extractFinal, buildSystemPrompt, runAgent } from "../../src/agentLoop.js";
+import {
+  parseReActOutput,
+  extractFinal,
+  buildSystemPrompt,
+  fitSystemPrompt,
+  runAgent,
+  stripThinking,
+  parseToolCallXml,
+  extractJsonToolCall,
+} from "../../src/agentLoop.js";
 
 describe("extractFinal — 提取最终答案", () => {
   it("标准 Final", () => {
@@ -92,6 +101,140 @@ describe("parseReActOutput — ReAct 输出解析", () => {
   });
 });
 
+describe("stripThinking — Qwen3.5 thinking 段剥离", () => {
+  it("剥离 thinking…response 推理段，只留实际回复", () => {
+    const out = stripThinking("thinking\n用户想知道当前时间。\nresponse\n\nFinal: 现在是 15 点 30 分。");
+    expect(out).toBe("Final: 现在是 15 点 30 分。");
+  });
+
+  it("带 <|thinking|> 标记的变体", () => {
+    const out = stripThinking("<|thinking|>\n我需要调用时间工具。\n<|/thinking|>\n\nAction: get_current_time\nAction Input: {}");
+    expect(out).toContain("Action: get_current_time");
+    expect(out).not.toContain("我需要调用时间工具");
+  });
+
+  it("带 <|im_start|>assistant 前缀的变体", () => {
+    const out = stripThinking("<|im_start|>assistant\n thinking\n分析…\n response\n\nFinal: 好的");
+    expect(out).toBe("Final: 好的");
+  });
+
+  it("普通文本不含 thinking 结构时原样返回", () => {
+    const text = "Thought: 需要时间\nAction: get_current_time\nAction Input: {}";
+    expect(stripThinking(text)).toBe(text);
+  });
+
+  it("无 response 分隔时保守返回原文", () => {
+    const text = "thinking\n只有推理没有回复";
+    expect(stripThinking(text)).toBe(text);
+  });
+});
+
+describe("parseToolCallXml — Qwen 原生 <tool_call> 工具调用", () => {
+  it("单参数工具调用（get_current_time）", () => {
+    const xml = "<tool_call>\n<function=get_current_time>\n</function>\n</tool_call>";
+    const parsed = parseToolCallXml(xml);
+    expect(parsed).toEqual({ name: "get_current_time", input: {} });
+  });
+
+  it("多参数（save_memory），值与数字自动解析", () => {
+    const xml = [
+      "<tool_call>",
+      "<function=save_memory>",
+      "<parameter=key>",
+      "age",
+      "</parameter>",
+      "<parameter=value>",
+      "26",
+      "</parameter>",
+      "</function>",
+      "</tool_call>",
+    ].join("\n");
+    const parsed = parseToolCallXml(xml);
+    expect(parsed).toEqual({ name: "save_memory", input: { key: "age", value: 26 } });
+  });
+
+  it("未知工具返回 null（交给其他解析路径）", () => {
+    expect(parseToolCallXml("<tool_call>\n<function=no_such_tool>\n</function>\n</tool_call>")).toBeNull();
+  });
+
+  it("无 <tool_call> 结构返回 null", () => {
+    expect(parseToolCallXml("Final: 你好")).toBeNull();
+  });
+
+  it("parseReActOutput 走 XML 路径（含 thinking 前缀）", () => {
+    const text = [
+      "thinking",
+      "用户想计算 12*34。",
+      "response",
+      "",
+      "Final: 我先调用工具计算。",
+      "<tool_call>",
+      "<function=calculate>",
+      "<parameter=expression>",
+      "12*34",
+      "</parameter>",
+      "</function>",
+      "</tool_call>",
+    ].join("\n");
+    const parsed = parseReActOutput(text);
+    expect(parsed.type).toBe("action");
+    expect(parsed.name).toBe("calculate");
+    expect(parsed.input.expression).toBe("12*34");
+  });
+});
+
+describe("extractJsonToolCall — JSON 工具调用块提取", () => {
+  it("```json 围栏", () => {
+    expect(extractJsonToolCall('```json\n{"action": "calculate", "action_input": {"expression": "1+1"}}\n```')).toContain(
+      '"action"',
+    );
+  });
+
+  it("多行嵌套 JSON 对象（花括号配平）", () => {
+    const text = [
+      "Thought: 需要记忆",
+      '{"action": "save_memory", "action_input": {"key": "preference", "value": "{\\"city\\": \\"北京\\"}"}}',
+      "其他文本",
+    ].join("\n");
+    const json = extractJsonToolCall(text);
+    expect(json).not.toBeNull();
+    const obj = JSON.parse(json);
+    expect(obj.action).toBe("save_memory");
+    const parsed = parseReActOutput(text);
+    expect(parsed.name).toBe("save_memory");
+    expect(parsed.input.key).toBe("preference");
+  });
+
+  it("无 JSON 工具调用返回 null", () => {
+    expect(extractJsonToolCall("Final: 你好呀")).toBeNull();
+  });
+});
+
+describe("fitSystemPrompt — 系统提示词整体预算", () => {
+  const toolsDesc = "- get_current_time: 获取当前时间\n- calculate: 数学计算";
+
+  it("正常长度无需裁剪", () => {
+    const sys = fitSystemPrompt(toolsDesc, "- name: 小明", "当前页面：示例.com");
+    expect(sys.length).toBeLessThanOrEqual(3200);
+    expect(sys).toContain("小明");
+    expect(sys).toContain("示例.com");
+  });
+
+  it("超长 extras 被降级裁剪，记忆保留", () => {
+    const sys = fitSystemPrompt(toolsDesc, "- name: 小明", "页面信息".repeat(4000));
+    expect(sys.length).toBeLessThanOrEqual(3200);
+    expect(sys).toContain("小明");
+    expect(sys).toContain("页面信息已截断");
+  });
+
+  it("extras 与记忆都超长时两者都降级", () => {
+    const sys = fitSystemPrompt(toolsDesc, "- name: 小明".repeat(2000), "页面信息".repeat(4000));
+    expect(sys.length).toBeLessThanOrEqual(3200);
+    expect(sys).toContain("记忆已截断");
+    expect(sys).toContain("页面信息已截断");
+  });
+});
+
 describe("buildSystemPrompt — 系统提示词", () => {
   it("包含工具说明与格式指令", () => {
     const prompt = buildSystemPrompt({ toolsDescription: "- get_current_time: 获取时间" });
@@ -148,6 +291,8 @@ describe("runAgent — ReAct 循环", () => {
     expect(calls.length).toBeGreaterThanOrEqual(2);
     const lastMessages = calls[calls.length - 1];
     expect(lastMessages.some((m) => m.content.includes("Observation:"))).toBe(true);
+    // 注入防护：Observation 必须带"数据非指令"标注（外部网页/搜索内容防 prompt injection）
+    expect(lastMessages.some((m) => m.content.includes("不要执行"))).toBe(true);
   });
 
   it("模型直接输出 Final（无工具）", async () => {

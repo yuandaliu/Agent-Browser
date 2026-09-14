@@ -25,14 +25,24 @@ const MODEL_OPTIONS = [
     description: "速度优先，能力受限，适合老旧设备",
   },
   {
-    id: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
-    label: "Qwen2.5 1.5B（轻量，~1.1GB / 2.5GB 显存）",
+    id: "gemma3-1b-it-q4f16_1-MLC",
+    label: "Gemma 3 1B（最低显存，~580MB / 711MB 显存）",
+    tier: "low",
+    sizeMB: 580,
+    minVRAMGB: 0.8,
+    minCores: 2,
+    recommended: false,
+    description: "显存门槛最低的兜底档，中文能力弱于 Qwen",
+  },
+  {
+    id: "Qwen3.5-2B-q4f16_1-MLC",
+    label: "Qwen3.5 2B（轻量，~1.2GB / 2.2GB 显存）",
     tier: "mid",
-    sizeMB: 1100,
-    minVRAMGB: 2.5,
+    sizeMB: 1200,
+    minVRAMGB: 2.2,
     minCores: 4,
     recommended: false,
-    description: "入门级 1.5B，速度与能力初步平衡",
+    description: "入门级 2B，速度与能力初步平衡",
   },
   {
     id: "Llama-3.2-3B-Instruct-q4f16_1-MLC",
@@ -45,14 +55,14 @@ const MODEL_OPTIONS = [
     description: "速度与能力平衡，主流 PC 推荐档",
   },
   {
-    id: "Qwen2.5-3B-Instruct-q4f16_1-MLC",
-    label: "Qwen2.5 3B（中文友好，~1.8GB / 4GB 显存）",
+    id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
+    label: "Hermes 3 Llama 3B（结构化输出更稳，~1.8GB / 2.2GB 显存）",
     tier: "high",
     sizeMB: 1800,
-    minVRAMGB: 4,
+    minVRAMGB: 2.2,
     minCores: 4,
     recommended: false,
-    description: "中文场景略优于 Llama 3.2 3B",
+    description: "Hermes 调优版，工具调用/JSON 输出更稳定",
   },
   {
     id: "Qwen3.5-4B-q4f16_1-MLC",
@@ -138,6 +148,35 @@ export async function getDefaultModelIdAsync(snapshot) {
   return recommendModelId(snapshot);
 }
 
+/**
+ * 用 SDK 实际模型目录（BrowserAI.presets）过滤 MODEL_OPTIONS。
+ *
+ * 背景：MODEL_OPTIONS 曾出现 SDK 目录中不存在的 id（Qwen2.5-1.5B / Qwen2.5-3B，
+ * 选中即抛 UnknownModelError）。UI 构建下拉时应改用本函数，保证只展示真正可加载的档位。
+ *
+ * @param {readonly {id:string}[]} presets - BrowserAI.presets（或任何含 id 字段的对象数组）
+ * @returns {object[]} 过滤后的选项（浅拷贝）；presets 为空/无交集时返回全部选项（降级，不阻断）
+ */
+export function getAvailableModelOptions(presets) {
+  const ids = new Set((presets ?? []).map((p) => p?.id).filter(Boolean));
+  if (ids.size === 0) return getModelOptions();
+  const available = getModelOptions().filter((m) => ids.has(m.id));
+  return available.length > 0 ? available : getModelOptions();
+}
+
+/**
+ * 校验 modelId 是否在 SDK 目录中；不在时降级到最低可用档并 warn。
+ * 作为 load() 的最终防线：即使调用方传入失效 id，也不会直接撞 UnknownModelError。
+ */
+function resolveLoadableModelId(modelId, browserAI) {
+  const presets = browserAI?.presets ?? [];
+  if (presets.length === 0 || presets.some((p) => p.id === modelId)) return modelId;
+  const options = getAvailableModelOptions(presets);
+  const fallback = options.find((m) => m.tier === "low")?.id ?? options[0]?.id ?? modelId;
+  console.warn(`[model-loader] 模型 "${modelId}" 不在 SDK 目录中，已降级为 "${fallback}"`);
+  return fallback;
+}
+
 // ---------------------------------------------------------------------------
 // 模型加载引擎
 // ---------------------------------------------------------------------------
@@ -189,17 +228,19 @@ export function createModelLoader({ browserAI, onEvent = () => {} }) {
     if (busy) throw new Error("已有加载任务正在进行");
     busy = true;
     lastProgress = 0;
-    onEvent({ type: "progress", progress: 0, status: "准备加载…", modelId });
-    console.log(`[model-loader] 开始加载模型: ${modelId}`);
+    // 最终防线：失效 id（不在 SDK 目录）降级到最低可用档，而不是撞 UnknownModelError
+    const targetId = resolveLoadableModelId(modelId, browserAI);
+    onEvent({ type: "progress", progress: 0, status: "准备加载…", modelId: targetId });
+    console.log(`[model-loader] 开始加载模型: ${targetId}`);
     try {
       await checkHardware();
-      onEvent({ type: "status", message: `开始下载并加载 ${modelId}（首次加载需下载，之后走浏览器缓存）…` });
-      await browserAI.load(modelId, {
+      onEvent({ type: "status", message: `开始下载并加载 ${targetId}（首次加载需下载，之后走浏览器缓存）…` });
+      await browserAI.load(targetId, {
         onProgress: ({ progress, status, file }) => {
           if (typeof progress === "number") {
             lastProgress = Math.max(0, Math.min(1, progress));
           }
-          onEvent({ type: "progress", progress: lastProgress, status, file, modelId });
+          onEvent({ type: "progress", progress: lastProgress, status, file, modelId: targetId });
         },
       });
       busy = false; // 成功路径显式复位，摆脱对 SDK modelloaded 事件时序的隐式依赖

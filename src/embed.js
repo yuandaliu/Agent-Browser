@@ -15,12 +15,12 @@
  */
 import { BrowserAI } from "@missionsquad/browserai";
 import { MemoryStore, createMemoryAdapter } from "./memory.js";
-import { createModelLoader, getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId } from "./modelLoader.js";
+import { createModelLoader, getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId, getAvailableModelOptions } from "./modelLoader.js";
 import { runAgent } from "./agentLoop.js";
 import { initPageWatcher, getPageSnapshot } from "./pageReader.js";
 import { getFailureLog as getFailureLogSingleton } from "./failureLog.js";
 
-export { getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId, BrowserAI, getPageSnapshot, initPageWatcher };
+export { getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId, getAvailableModelOptions, BrowserAI, getPageSnapshot, initPageWatcher };
 export { safeEvaluate } from "./tools.js";
 export { getFailureLog, FailureLog, MAX_FAILURES } from "./failureLog.js";
 export { getToolJsonSchema, getToolJsonSchemas, validateToolInput, getOpenAIToolsFormat } from "./toolSchemas.js";
@@ -118,9 +118,15 @@ export function createLocalAgent(options = {}) {
         }
       }
       initialized = true;
-      // 启动当前宿主页面实时监听（MutationObserver 维护正文缓存，供 read_page_content 使用）
-      pageWatcher = initPageWatcher();
-      if (pageWatcher) console.log("[embed] 已启动页面实时内容监听");
+      // 启动当前宿主页面实时监听（MutationObserver 维护正文缓存，供 read_page_content 使用）。
+      // 失败不阻断初始化：read_page_content 工具在无缓存时仍会实时读取页面。
+      try {
+        pageWatcher = initPageWatcher();
+        if (pageWatcher) console.log("[embed] 已启动页面实时内容监听");
+      } catch (err) {
+        console.warn("[embed] 页面实时监听启动失败（read_page_content 仍可实时读取）:", err?.message ?? err);
+        pageWatcher = null;
+      }
       // 注册 Service Worker（best-effort，失败不阻塞主流程）
       await registerServiceWorker();
       // 硬件预检（不抛错，仅在可用时通知）
@@ -130,6 +136,8 @@ export function createLocalAgent(options = {}) {
         // 自动选档：modelId === "auto" 时，根据硬件决定推荐档
         if (modelId === "auto" && !actualModelId) {
           actualModelId = recommendModelId(snapshot);
+          // 推荐值必须真实存在于 SDK 目录（防 MODEL_OPTIONS 与目录脱节时推荐失效 id）
+          actualModelId = resolveCatalogId(actualModelId);
           const recommendedOpt = getModelOptions().find((m) => m.id === actualModelId);
           emit({ type: "model-recommended", modelId: actualModelId, snapshot });
           emit({ type: "status", message: `为你的设备推荐：${recommendedOpt?.label ?? actualModelId}` });
@@ -170,6 +178,24 @@ export function createLocalAgent(options = {}) {
   /** 获取当前推荐的模型 ID（ready() 后才有值；否则为 null 或用户指定值） */
   function getRecommendedModelId() {
     return actualModelId;
+  }
+
+  /**
+   * 获取 SDK 目录中实际可加载的模型选项（用 BrowserAI.presets 过滤 MODEL_OPTIONS）。
+   * UI 构建模型下拉时应使用本函数，避免展示"选中即 UnknownModelError"的失效档位。
+   */
+  function getAvailableModels() {
+    return getAvailableModelOptions(ai?.presets);
+  }
+
+  /** 把任意 modelId 校正到 SDK 目录中存在的 id：存在则原样返回，否则取最低可用档 */
+  function resolveCatalogId(modelId) {
+    const presets = ai?.presets ?? [];
+    if (presets.length === 0 || presets.some((p) => p.id === modelId)) return modelId;
+    const options = getAvailableModelOptions(presets);
+    const fallback = options.find((m) => m.tier === "low")?.id ?? options[0]?.id ?? modelId;
+    console.warn(`[embed] 模型 "${modelId}" 不在 SDK 目录中，已降级为 "${fallback}"`);
+    return fallback;
   }
 
   /**
@@ -383,6 +409,7 @@ export function createLocalAgent(options = {}) {
     isModelLoaded,
     getLoadedModelId,
     getRecommendedModelId,
+    getAvailableModels,
     getSWRegistration: () => swRegistration,
     getStats,
     clearStats,

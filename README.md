@@ -101,7 +101,7 @@ server/dev-proxy.mjs    本地模型代理：/hf* → hf-mirror.com，/gh-raw* �
 ## 🧪 测试
 
 ```bash
-npm test                # 单元测试（vitest，141 项）：解析器、计算器、工具、记忆、页面读取、失败日志、dev-proxy、模型自适应、SW策略、JSON Schema
+npm test                # 单元测试（vitest，156 项）：解析器、计算器、工具、记忆、页面读取、失败日志、dev-proxy、模型自适应、SW策略、JSON Schema
 npm run test:e2e        # E2E 验收（Playwright + 系统 Chrome + WebGPU，需先启动 proxy 与 dev）
 node tests/e2e-probe.mjs  # 快速探测：页面 / WebGPU / 控制台
 ```
@@ -165,10 +165,15 @@ npm run test:offline
 | 模型 ID | 档位 | 下载 / 显存 | 适用设备 | 推荐 |
 | --- | --- | --- | --- | --- |
 | `Qwen3.5-0.8B-q4f16_1-MLC` | low | ~447MB / 1.6GB | 低端 / 无 GPU 加速 | — |
-| `Qwen2.5-1.5B-Instruct-q4f16_1-MLC` | mid | ~1.1GB / 2.5GB | 4 核、入门档 | — |
+| `gemma3-1b-it-q4f16_1-MLC` | low | ~580MB / 0.8GB | 显存最紧张的兜底档 | — |
+| `Qwen3.5-2B-q4f16_1-MLC` | mid | ~1.2GB / 2.2GB | 4 核、入门档 | — |
 | `Llama-3.2-3B-Instruct-q4f16_1-MLC` | **high** | ~1.8GB / 4GB | 主流 PC（4+ 核） | ⭐ **自动推荐** |
-| `Qwen2.5-3B-Instruct-q4f16_1-MLC` | high | ~1.8GB / 4GB | 中文场景更佳 | — |
+| `Hermes-3-Llama-3.2-3B-q4f16_1-MLC` | high | ~1.8GB / 2.2GB | 工具调用/JSON 更稳的调优版 | — |
 | `Qwen3.5-4B-q4f16_1-MLC` | ultra | ~2.4GB / 6GB | 高端 PC（8+ 核） | — |
+
+> 所有档位均经过 SDK 目录校验：`MODEL_OPTIONS` 的每个 id 必须存在于
+> BrowserAI 的 `MODEL_PRESETS` 中（单元测试强制断言），且页面下拉与 `load()`
+> 均按实际目录过滤/降级，杜绝"选中即 UnknownModelError"的失效选项。
 
 **自适应逻辑**（`src/modelLoader.js:recommendModelId(snapshot)`）：
 - 不支持 WebGPU → 最低档
@@ -176,12 +181,13 @@ npm run test:offline
 - 4 核 → high（Llama 3.2 3B 推荐档）
 - 8 核及以上 → 优先 ultra，回退 high
 
-**手动覆盖**：在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 增删模型；或在宿主代码里传 `createLocalAgent({ modelId: "Qwen2.5-3B-..." })`。
+**手动覆盖**：在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 增删模型；或在宿主代码里传 `createLocalAgent({ modelId: "Qwen3.5-2B-..." })`。
 
 **新模型接入前请确认**：
 1. MLC 后端有对应编译权重（id 必须有 `q4f16_1-MLC` 等量化后缀）
 2. 在 `MODEL_OPTIONS` 里补全元数据（tier / sizeMB / minVRAMGB / minCores / description）
 3. 首次使用在本地实测可加载；若失败先从 `MODEL_OPTIONS` 移除该选项
+4. 跑 `npm test`——"MODEL_OPTIONS ⊆ SDK 真实目录（MODEL_PRESETS）"的单元测试会立即拦截失效 id
 
 ## 📊 性能与可观测性
 

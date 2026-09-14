@@ -83,4 +83,20 @@ describe("MemoryStore — 长期记忆", () => {
     expect(memories).toHaveLength(1);
     expect(memories[0].key).toBe("b");
   });
+
+  it("超过长期记忆上限时自动裁剪最旧条目", async () => {
+    const store = await createStore();
+    for (let i = 0; i < 110; i++) {
+      await store.saveMemory(`key-${i}`, `value-${i}`);
+    }
+    // saveMemory 内部异步触发裁剪，这里显式收敛一次再断言（避免微任务竞态）
+    await store.trimMemories();
+    const memories = await store.getMemories();
+    expect(memories.length).toBe(100);
+    const keys = memories.map((m) => m.key);
+    // 最旧的 10 条被裁剪，最新的保留
+    expect(keys).not.toContain("key-0");
+    expect(keys).not.toContain("key-9");
+    expect(keys).toContain("key-109");
+  });
 });

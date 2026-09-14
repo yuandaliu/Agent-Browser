@@ -15,7 +15,15 @@
  */
 
 import { runTool, TOOL_NAMES, toolsDescription } from "./tools.js";
-import { budgetMemoryContext, budgetObservation, budgetHistory } from "./contextBudget.js";
+import {
+  budgetMemoryContext,
+  budgetObservation,
+  budgetHistory,
+  clipText,
+  SYSTEM_PROMPT_BUDGET,
+  SYSTEM_EXTRAS_BUDGET,
+  SYSTEM_MEMORY_FALLBACK_BUDGET,
+} from "./contextBudget.js";
 import { validateToolInput } from "./toolSchemas.js";
 
 export const MAX_STEPS = 5;
@@ -54,9 +62,49 @@ Action Input: {}
 Final: 现在是 15 点 30 分。`;
 }
 
+/**
+ * 控制 system prompt 整体长度（字符预算）。
+ * 优先满足 4K token 上下文的小模型：工具描述/格式指令不可裁，
+ * 超限时按 页面 extras → 长期记忆 的顺序降级裁剪，避免静默撑爆 context。
+ */
+export function fitSystemPrompt(toolsDescription, memoryContext = "", systemExtras = "") {
+  const build = (mem, extras) =>
+    buildSystemPrompt({ toolsDescription, memoryContext: mem, systemExtras: extras });
+  let sys = build(memoryContext, systemExtras);
+  if (sys.length <= SYSTEM_PROMPT_BUDGET) return sys;
+
+  const extras2 = clipText(systemExtras, SYSTEM_EXTRAS_BUDGET, { label: "页面信息已截断" });
+  sys = build(memoryContext, extras2);
+  if (sys.length <= SYSTEM_PROMPT_BUDGET) return sys;
+
+  const mem2 = clipText(memoryContext, SYSTEM_MEMORY_FALLBACK_BUDGET, { label: "记忆已截断" });
+  return build(mem2, extras2);
+}
+
 // ---------------------------------------------------------------------------
 // 解析器
 // ---------------------------------------------------------------------------
+
+/**
+ * 剥离 Qwen3 / Qwen3.5 等 thinking 模型的推理段：
+ * 输出形如 " thinking\n<推理内容>\n response\n\n<实际内容>"（可能带 <|thinking|> /
+ * <|im_start|>assistant 前缀）。仅当文本以 thinking 行开头且存在 response 分隔时才剥离，
+ * 否则原样返回（保守，不误伤普通对话文本）。
+ */
+export function stripThinking(text) {
+  if (!text || typeof text !== "string") return text;
+  const normalized = String(text)
+    .replace(/^\s*<\|im_start\|>assistant\s*/i, "")
+    .replace(/<\|thinking\|>/gi, "thinking\n")
+    .replace(/<\|\/thinking\|>/gi, "response\n");
+  const m = normalized.match(/^\s*thinking\s*\n[\s\S]*?\n\s*response\s*\n?([\s\S]*)$/i);
+  if (m) {
+    const rest = m[1].trimStart();
+    // response 段为空时保守返回原文（推理段里可能已含工具调用，交给后续解析路径）
+    return rest || text;
+  }
+  return text;
+}
 
 /** 全角冒号/逗号规整为半角，便于正则 */
 function normalizeColons(text) {
@@ -123,20 +171,106 @@ function extractActionInput(text) {
 }
 
 /**
+ * 把 <tool_call> XML 参数值按 JSON 语义解析（true/false/数字/JSON 对象），失败保持字符串。
+ */
+function tryParseJsonValue(raw) {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  if (raw === "null") return null;
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      /* 按字符串处理 */
+    }
+  }
+  return raw;
+}
+
+/**
+ * 解析 Qwen 原生 <tool_call> 工具调用 XML（Qwen3 / Qwen3.5 等新一代模型的本地格式）：
+ *   <tool_call>
+ *   <function=calculate>
+ *   <parameter=expression>
+ *   12+34
+ *   </parameter>
+ *   </function>
+ *   </tool_call>
+ * @returns {{name:string, input:object}|null} 未知工具或格式不完整返回 null
+ */
+export function parseToolCallXml(text) {
+  if (!text || typeof text !== "string") return null;
+  const blocks = [...text.matchAll(/<tool_call>([\s\S]*?)<\/tool_call>/gi)];
+  if (blocks.length === 0) return null;
+  const block = blocks[blocks.length - 1][1]; // 取最后一个（与 extractFinal 同策略）
+  const fnMatch = block.match(/<function\s*=\s*([\w.-]+)>/i);
+  if (!fnMatch) return null;
+  const name = fnMatch[1].trim();
+  if (!TOOL_NAMES.includes(name)) return null; // 未知工具：交给其他解析路径（如 Final）
+  const input = {};
+  for (const pm of block.matchAll(/<parameter\s*=\s*(.+?)>([\s\S]*?)<\/parameter>/gi)) {
+    const key = pm[1].trim();
+    input[key] = tryParseJsonValue(pm[2].trim());
+  }
+  return { name, input };
+}
+
+/**
+ * 提取 JSON 工具调用块：优先 ```json 围栏；否则定位 {"action"/{"name"/{"tool" 起始，
+ * 以花括号配平截取完整对象（支持多行与嵌套结构）。
+ * @returns {string|null} JSON 文本或 null
+ */
+export function extractJsonToolCall(text) {
+  if (!text || typeof text !== "string") return null;
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
+  if (fenced) return fenced[1].trim();
+  const startIdx = text.search(/\{\s*"(?:action|name|tool)"\s*:/i);
+  if (startIdx === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIdx; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(startIdx, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
  * 解析模型的 ReAct 输出。
  * @returns {{type:"action", name:string, input:any} | {type:"final", text:string} | {type:"unknown", text:string}}
  */
 export function parseReActOutput(text) {
   if (!text || typeof text !== "string") return { type: "unknown", text: String(text ?? "") };
 
-  const final = extractFinal(text);
+  // 0) Qwen3 / Qwen3.5 等 thinking 模型：剥离 "thinking…response" 推理段，只解析实际回复
+  const core = stripThinking(text);
+  const final = extractFinal(core);
 
-  // 1) JSON 工具调用块（部分小模型被训练成输出 JSON 工具调用）
-  const jsonCall = text.match(/```json\s*([\s\S]*?)```|(\{[^{}]*"(?:action|name|tool)"[^{}]*\})/i);
+  // 1) Qwen 原生 <tool_call> XML（Qwen3.5 等新一代模型输出）
+  const xmlCall = parseToolCallXml(core);
+  if (xmlCall) return { type: "action", name: xmlCall.name, input: xmlCall.input };
+
+  // 2) JSON 工具调用块（```json 围栏或 {"action":…} 对象，支持多行/嵌套）
+  const jsonCall = extractJsonToolCall(core);
   if (jsonCall) {
-    const candidate = (jsonCall[1] ?? jsonCall[2]).trim();
     try {
-      const obj = JSON.parse(candidate);
+      const obj = JSON.parse(jsonCall);
       const name = obj.action ?? obj.name ?? obj.tool;
       if (name && TOOL_NAMES.includes(String(name))) {
         return { type: "action", name: String(name), input: obj.action_input ?? obj.input ?? obj.arguments ?? obj.parameters ?? {} };
@@ -146,14 +280,14 @@ export function parseReActOutput(text) {
     }
   }
 
-  const actionName = extractActionName(text);
+  const actionName = extractActionName(core);
 
   if (actionName) {
     const name = actionName.trim();
     if (TOOL_NAMES.includes(name)) {
       let input = null;
       try {
-        const raw = extractActionInput(text);
+        const raw = extractActionInput(core);
         if (raw) {
           if (raw.trim().startsWith("{")) {
             input = JSON.parse(raw.trim());
@@ -168,14 +302,14 @@ export function parseReActOutput(text) {
       if (input !== null) return { type: "action", name, input };
       // 有 Action 但无 Input：尝试用空参数（get_current_time 等无参工具）
       if (name === "get_current_time") return { type: "action", name, input: {} };
-      return { type: "unknown", text: final ?? text };
+      return { type: "unknown", text: final ?? core.trim() };
     }
     // Action 名未知 → 若同时有 Final 优先用 Final，否则原样输出
-    return { type: "unknown", text: final ?? text };
+    return { type: "unknown", text: final ?? core.trim() };
   }
 
   if (final) return { type: "final", text: final };
-  return { type: "unknown", text: text.trim() };
+  return { type: "unknown", text: core.trim() };
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +349,8 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     /* 记忆不可用时不阻断对话 */
   }
 
-  const system = buildSystemPrompt({ toolsDescription: toolsDescription(), memoryContext, systemExtras });
+  // system prompt 整体受预算约束（extras → 记忆 降级），防止小模型 context 被撑爆
+  const system = fitSystemPrompt(toolsDescription(), memoryContext, systemExtras);
 
   // 组装消息：system + 最近历史（每条裁剪）+ 当前用户输入
   let history = [];

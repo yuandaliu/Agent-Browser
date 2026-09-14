@@ -12,8 +12,36 @@
  * - 用户可控：暴露 getFailureLog / clearFailureLog 给宿主页面
  */
 
+import { clipText } from "./contextBudget.js";
+
 const STORAGE_KEY = "local-llm-agent:failure-log";
 const MAX_FAILURES = 20;
+
+// 单条失败记录的内容裁剪参数（localStorage 5MB 保护）
+const MAX_FAILURE_STEPS = 20; // steps 最多保留条数
+const MAX_FAILURE_RAW = 4; // rawTexts 最多保留条数
+const MAX_FAILURE_TEXT = 600; // 单条 step/raw 文本最大字符数
+
+/** 裁剪 steps：保留最新 N 条，超长字段（text / result）截断 */
+function sanitizeSteps(steps) {
+  if (!Array.isArray(steps)) return steps;
+  const clipField = (v) =>
+    typeof v === "string" && v.length > MAX_FAILURE_TEXT
+      ? clipText(v, MAX_FAILURE_TEXT, { label: "步骤原文已截断" })
+      : v;
+  return steps
+    .slice(-MAX_FAILURE_STEPS)
+    .map((s) => (s && typeof s === "object" ? { ...s, text: clipField(s.text), result: clipField(s.result) } : s));
+}
+
+/** 裁剪 rawTexts：保留最新 N 条，每条超长截断 */
+function sanitizeRawTexts(rawTexts) {
+  if (!Array.isArray(rawTexts)) return rawTexts;
+  return rawTexts.slice(-MAX_FAILURE_RAW).map((t) => {
+    const s = String(t ?? "");
+    return s.length > MAX_FAILURE_TEXT ? clipText(s, MAX_FAILURE_TEXT, { label: "原始输出已截断" }) : t;
+  });
+}
 
 /** 默认 storage 适配器：localStorage 优先，Node 环境降级内存 Map */
 function createDefaultStorage() {
@@ -53,6 +81,10 @@ export class FailureLog {
       const enriched = {
         timestamp: Date.now(),
         ...entry,
+        // 容量保护：steps / rawTexts 裁剪后再入库，
+        // 避免步骤原文（每步可达数千字符）累积撑爆 localStorage 5MB 配额
+        steps: sanitizeSteps(entry.steps),
+        rawTexts: sanitizeRawTexts(entry.rawTexts),
       };
       const list = this.#read();
       list.push(enriched);
