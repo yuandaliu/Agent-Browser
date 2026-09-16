@@ -1,159 +1,57 @@
-# 🔌 集成指南：把本地智能体嵌入已有 Web 页面
+# 集成指南：把本地智能体嵌入已有 Web 页面
 
-本项目的核心（模型加载 / ReAct 循环 / 工具 / 记忆）与 UI 完全解耦，可以像组件一样嵌入
+本项目的核心（模型加载 / ReAct 循环 / 工具 / 记忆 / 页面读取）与 UI 完全解耦，可以像组件一样嵌入
 任意已有页面。提供三种接入方式，按宿主工程的构建能力选择。
 
----
+## 1. 选择接入方式
 
-## 📋 嵌入实操流程（Step by Step，推荐顺序）
-
-```mermaid
-flowchart LR
-  A[1.确认宿主环境] --> B[2.准备嵌入包] --> C[3.部署模型代理] --> D[4.写嵌入代码] --> E[5.本地联调] --> F[6.验证] --> G[7.上线检查]
-```
-
-### Step 1 · 确认宿主环境（30 秒）
-回答三个问题，决定后续步骤：
 | 问题 | 分支 |
 | --- | --- |
-| 宿主页面有无构建工具（Vite/Webpack）？ | 有 → **方式一**（源码）；无 → **方式二**（单文件产物） |
-| 宿主站点部署在哪？（Vercel / Netlify / 自建） | 决定 Step 3 的代理配置 |
-| 宿主要求零代码接入？ | 是 → **方式三**（iframe），跳到 Step 7 |
+| 宿主页面有无构建工具（Vite / Webpack）？ | 有 → **方式一**（npm 源码复用）；无 → **方式二**（单文件产物） |
+| 宿主站点部署在哪？（Vercel / Netlify / 自建） | 决定第 2 节的代理配置 |
+| 宿主要求零代码接入？ | 是 → **方式三**（iframe） |
 
-### Step 2 · 准备嵌入包
-```bash
-# 方式一（有构建工具）：在宿主工程里
-npm install @missionsquad/browserai
-# 然后拷贝本项目 src/ 下 5 个文件：
-#   embed.js  agentLoop.js  tools.js  memory.js  modelLoader.js
+## 2. 前置条件：模型下载代理（必需，否则模型下载会失败）
 
-# 方式二（无构建工具）：在本仓库执行
-npm install
-npm run build:embed     # 产出 dist-embed/
-# 把整个 dist-embed/ 目录上传到宿主站点的同源路径，如 https://你的域名/local-agent/
-```
+模型权重托管在 HuggingFace（国内无法直连），嵌入页面必须能访问**同源**的 `/hf/*`、`/hf-transformers/*`、
+`/gh-raw/*` 路由（`createLocalAgent` 默认 `modelSource: "proxy"`，即请求这些路径）。
 
-### Step 3 · 部署模型代理（关键！否则模型下载会失败）
-模型权重在 HuggingFace（国内无法直连），嵌入页必须能访问**同源**的 `/hf/*`、`/gh-raw/*` 路由。
-
-| 宿主平台 | 操作 |
+| 宿主部署位置 | 方案 |
 | --- | --- |
-| **Vercel** | 在宿主仓库根目录放 `vercel.json`（内容见本仓库），`rewrites` 把 `/hf/* → hf-mirror.com`、`/gh-raw/* → jsdelivr`。⚠️ 宿主已有 `vercel.json` 时，把 `rewrites` 数组合并进去 |
-| **Netlify** | 放 `netlify.toml`，`[[redirects]] status=200 force=true` 透明代理（同上合并） |
-| **自建服务器 / Cloudflare Worker** | 部署 `server/dev-proxy.mjs`（Node）或 worker-template，宿主页面配置 `proxyOrigin: "https://代理域名"` |
+| **Vercel** | 宿主仓库根目录放 `vercel.json`（内容见本仓库），`rewrites` 转发 `/hf/* → hf-mirror.com`、`/gh-raw/* → jsdelivr`。宿主已有 `vercel.json` 时，把 `rewrites` 数组合并进去 |
+| **Netlify** | 放 `netlify.toml`，用 `[[redirects]] status=200 force=true` 透明代理（同样合并）。注意 gh-raw 路径重排限制，见 `README.md` |
+| **Cloudflare Worker / 自建服务器** | 部署 `server/dev-proxy.mjs`（Node）或 BrowserAI 仓库的 `worker-template/`，宿主页面配置 `proxyOrigin` 指向它 |
+| **完全离线 / 内网** | 用 `npx serve` 之类静态托管模型文件，或改造代理指向内网镜像 |
 
-> 自建代理跨域时：`createLocalAgent({ proxyOrigin: "https://你的代理" })`，代理已内置 CORS 头。
+> 宿主域名与代理不同源时：`createLocalAgent({ proxyOrigin: "https://代理域名" })`；代理已内置 CORS 头
+> （`server/dev-proxy.mjs`）。
 
-### Step 4 · 写嵌入代码（最小可用模板）
-```js
-// 方式一（源码）
-import { createLocalAgent } from "./embed.js";
-// 方式二（产物）—— 见 Step 5 的 HTML 模板
+## 3. 方式一：npm / 源码复用（宿主工程有构建工具，推荐）
 
-const agent = createLocalAgent({
-  // modelId 留空或传 "auto"：ready() 内部探测硬件（WebGPU + 核数），
-  // 通过 onEvent 的 "model-recommended" 事件告知推荐档位，下拉自动切到该项
-  // modelId: "auto",   // ← 默认值；可显式指定如 "Qwen3.5-2B-q4f16_1-MLC"
-  onProgress: ({ progress, status }) => {
-    bar.style.width = `${Math.round(progress * 100)}%`;   // 渲染进度条
-  },
-  onReady: () => { sendBtn.disabled = false; },            // 解锁对话
-  onError: (err) => { showError(err.message); },           // WebGPU 不支持等
-  onEvent: (e) => {
-    if (e.type === "model-recommended") {
-      // ready() 后 SDK 已自动选档，可读取 e.modelId / e.snapshot
-      console.log(`为你的设备推荐：${e.modelId}`);
-    }
-  },
-});
-
-await agent.ready();                 // ① 初始化（同步选档）
-loadBtn.onclick = () => agent.load();// ② 加载推荐档（或下拉里手动覆盖）
-sendBtn.onclick = async () => {
-  const { answer } = await agent.chat(input.value, {
-    onStep: (s) => { /* action / observation / final 渲染思考过程 */ },
-    onDelta: (full) => { /* 流式更新 */ },
-  });
-  bubble.textContent = answer;       // ③ 渲染最终答案
-};
-```
-
-#### 4.1 · 模型选择策略（设备自适应）
-
-默认 `modelId: "auto"`。`ready()` 完成后 SDK 会：
-
-1. 调用 `ai.probeHardware()` 拿到 WebGPU / 核数信息
-2. 根据启发式算法推荐最合适的模型档：
-   - 不支持 WebGPU → `Qwen3.5-0.8B`（最低门槛）
-   - 2 核以下 → 同上
-   - 4 核 → `Qwen3.5-2B`（推荐档 ⭐，带 `recommended: true`）
-   - 8 核及以上 → 命中带 `recommended` 标记的档（仍是 Qwen3.5-2B）；
-                想"高核直接上 ultra"可把 `Qwen3.5-4B` 也标 `recommended: true`
-3. 触发 `onEvent({ type: "model-recommended", modelId, snapshot })`
-4. 用户可从下拉里手动覆盖
-
-如果宿主想跳过自动选档，显式指定模型：
-```js
-const agent = createLocalAgent({ modelId: "Qwen3.5-2B-q4f16_1-MLC" });
-```
-> 传入的 id 必须存在于 SDK 模型目录（`MODEL_PRESETS`）中；失效 id 会在 `load()` 时自动降级到最低可用档并输出 console.warn。
-
-可用模型清单见 `src/modelLoader.js` 的 `MODEL_OPTIONS`，含元数据（tier / sizeMB / minVRAMGB / minCores / recommended）。
-
-### Step 5 · 本地联调（方式二示例：无构建工具页面）
-把下面内容保存为 `embed-test.html`，与 `dist-embed/` 放在同一目录，用任意静态服务器打开
-（如 `npx serve .` 或 `python -m http.server`），验证 4 行代码能跑通：
-
-```html
-<script type="module">
-  import { createLocalAgent } from "./dist-embed/local-agent.esm.js";
-  const agent = createLocalAgent({
-    onProgress: ({ progress }) => console.log("加载进度", Math.round(progress * 100) + "%"),
-    onReady: () => console.log("✅ 模型已就绪"),
-    onError: (err) => console.error(err),
-  });
-  await agent.ready();
-  await agent.load();               // 首次需下载推荐档（默认 Qwen3.5 2B 约 1.2GB），务必先配好 Step 3 的代理
-  const { answer } = await agent.chat("现在几点", {});
-  console.log("回复:", answer);
-</script>
-```
-
-### Step 6 · 验证
-- 自动化：本仓库 `npm run test:embed`（需先起 proxy 与 dev）验证完整浮窗示例；
-- 手动：在页面对话框依次验证时间、计算、记忆三类问题，逐条核对结果；
-- 网络：浏览器 F12 → Network，确认模型文件经 `/hf/...` 返回 200 且无 CORS 报错。
-
-### Step 7 · 上线检查清单
-- [ ] 页面能打开且无控制台报错
-- [ ] 「加载模型」进度条 0→100%，二次打开走缓存秒开
-- [ ] 对话流式输出正常，思考过程（Action/Observation）可见
-- [ ] 首次加载提示已呈现（默认档约 1.2GB，请耐心等待）
-- [ ] 不支持 WebGPU 的浏览器有降级提示（`onError` 分支）
-- [ ] 已处理与宿主页面的样式冲突（浮窗类名加前缀或 Shadow DOM）
-
----
-
-## 方式一：npm / 源码方式（推荐，宿主工程有构建工具）
-
-宿主工程是 Vite / Webpack / 其他打包器时，直接以源码复用，体积最小、可定制最强。
+体积最小、可定制最强。
 
 ```bash
 # 在宿主工程中安装依赖
 npm install @missionsquad/browserai
 ```
 
-把以下文件拷入宿主工程（或发布为私有 npm 包后 install）：
+把以下 **9 个文件**拷入宿主工程（或发布为私有 npm 包后 install）：
 
 ```
-src/embed.js          ← 嵌入式 API（唯一入口）
-src/agentLoop.js      ← ReAct 循环（依赖 ./tools.js）
-src/tools.js          ← 工具系统（无第三方依赖）
-src/memory.js         ← IndexedDB 记忆
-src/modelLoader.js    ← 模型加载引擎（依赖 ./memory 无关，仅 SDK）
+src/embed.js           嵌入式 API（唯一入口）
+src/agentLoop.js       ReAct 循环
+src/tools.js           工具系统
+src/toolSchemas.js     由 TOOLS 派生的 JSON Schema / OpenAI tools 格式
+src/contextBudget.js   上下文预算裁剪与记忆条目校验
+src/pageReader.js      页面实时内容读取
+src/memory.js          IndexedDB 记忆
+src/modelLoader.js     模型加载引擎
+src/failureLog.js      失败对话调试日志
 ```
 
-> `embed.js` 之外的 4 个文件都是**无 DOM 依赖**的纯逻辑模块，可整体移植。
+> - 除 `embed.js` 外均为**无 DOM 依赖**的纯逻辑模块（`pageReader.js` 在无 DOM 环境自动降级），可整体移植。
+> - 依赖关系：`agentLoop.js` → `contextBudget.js` / `toolSchemas.js`；`tools.js` → `pageReader.js` /
+>   `contextBudget.js`；`toolSchemas.js` → `tools.js`；`failureLog.js` → `contextBudget.js`。拷贝时勿遗漏。
 
 宿主代码：
 
@@ -162,16 +60,22 @@ src/modelLoader.js    ← 模型加载引擎（依赖 ./memory 无关，仅 SDK�
 import { createLocalAgent } from "./embed.js";
 
 const agent = createLocalAgent({
+  // modelId 留空或传 "auto"（默认）：ready() 内部探测硬件（WebGPU + 核数），
+  // 通过 onEvent 的 "model-recommended" 事件告知推荐档位，下拉自动切到该项
+  // modelId: "Qwen3.5-2B-q4f16_1-MLC",  // 也可显式指定
   onProgress: ({ progress, status }) => renderProgressBar(progress, status), // 0-1
   onReady: ({ modelId }) => enableChatUI(modelId),
   onError: (err) => showError(err.message),
+  onEvent: (e) => {
+    if (e.type === "model-recommended") console.log(`为你的设备推荐：${e.modelId}`);
+  },
 });
 
 // 页面加载后初始化
 await agent.ready();
 
-// 用户点击"加载模型"
-await agent.load(); // 默认走 ready() 推荐档（Qwen3.5-2B），也可显式指定如 agent.load("Qwen3.5-4B-q4f16_1-MLC")
+// 用户点击“加载模型”（默认走 ready() 推荐档，也可显式指定）
+await agent.load();
 
 // 用户发送消息
 const { answer } = await agent.chat("现在几点", {
@@ -183,21 +87,26 @@ const { answer } = await agent.chat("现在几点", {
 });
 ```
 
-**API 一览**（`createLocalAgent(options)` 返回）：
+### API 一览
+
+`createLocalAgent(options)` 返回：
 
 | 方法 | 说明 |
 | --- | --- |
-| `ready()` | 初始化（IndexedDB + WebGPU 探测 + 事件订阅 + **启动页面实时内容监听**） |
-| `load(modelId?)` | 加载模型（默认 `options.modelId`），进度经回调输出 |
-| `chat(text, { onStep, onDelta })` | 对话，自动写入历史；返回 `{ answer, steps, rawTexts }` |
+| `ready()` | 初始化（IndexedDB + WebGPU 探测 + 事件订阅 + **启动页面实时内容监听**），幂等 |
+| `load(modelId?)` | 加载模型（默认 `options.modelId` / 推荐档），单飞保护；id 不在 SDK 目录时降级到最低可用档并 `console.warn` |
+| `unload()` / `dispose()` | 卸载模型 / 完全销毁（含停止页面监听、释放 WebGPU 上下文与 worker） |
+| `chat(text, { onStep, onDelta })` | 对话，自动写入历史；返回 `{ answer, steps, rawTexts }`；输入为空或模型未加载会抛错 |
 | `isModelLoaded()` / `getLoadedModelId()` | 加载状态查询 |
+| `getRecommendedModelId()` / `getAvailableModels()` | 推荐档位 / 可用档位列表 |
+| `getStats()` / `clearStats()` | 性能快照（字段见 `README.md`「性能与可观测性」）/ 清空 |
 | `getHistory()` / `clearHistory()` | 对话历史读写（跨轮上下文） |
-| `getMemories()` / `saveMemory(k,v)` / `recallMemory(q)` / `clearMemories()` | 长期记忆 |
-| `unload()` / `dispose()` | 卸载模型 / 完全销毁（含停止页面监听） |
+| `getMemories()` / `saveMemory(k, v)` / `recallMemory(q)` / `clearMemories()` | 长期记忆 |
+| `getFailureLog()` / `clearFailureLog()` | 失败对话调试日志（最近 20 条） |
+| `getSWRegistration()` | 当前 Service Worker 注册对象 |
+| `_ai` / `_memory` | 底层 SDK 与记忆实例（高级用法） |
 
-> 智能体内置 `read_page_content` 工具：可读取**当前嵌入页面**的实时内容（标题/URL/正文，
-> MutationObserver 实时缓存）。宿主也可直接 `import { getPageSnapshot } from "./pageReader.js"`
-> 自行调用。iframe 跨域场景需宿主用 `postMessage` 推送页面内容。
+构造参数（`options`）：
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
@@ -206,13 +115,17 @@ const { answer } = await agent.chat("现在几点", {
 | `proxyOrigin` | 本地 127.0.0.1 / 托管页面同源 | 本地强制 IPv4 loopback；远程部署用 `location.origin` |
 | `verifyProxy` | 本地 true / 托管 false | 是否探测代理健康 |
 | `maxSteps` | 5 | ReAct 最大循环步数 |
-| `onProgress` / `onStatus` / `onReady` / `onError` | — | 加载事件回调 |
+| `memoryAdapter` | `null`（IndexedDB） | 自定义记忆适配器 |
+| `onEvent` | — | 统一事件回调（`progress` / `status` / `ready` / `hardware` / `error` / `model-recommended`） |
+| `onProgress` / `onStatus` / `onReady` / `onError` | — | 拆分的加载事件回调 |
 
----
+> 智能体内置 `read_page_content` 工具：可读取**当前嵌入页面**的实时内容（标题 / URL / 正文，
+> MutationObserver 实时缓存）。宿主也可直接 `import { getPageSnapshot } from "./pageReader.js"` 自行调用。
+> iframe 跨域场景需宿主用 `postMessage` 推送页面内容。
 
-## 方式二：单文件产物（宿主页面无构建工具，直接用 <script>）
+## 4. 方式二：单文件产物（宿主页面无构建工具）
 
-先用本项目仓库构建出 ESM 单入口（chunk 按需加载）：
+先用本项目仓库构建出 ESM 单入口：
 
 ```bash
 npm install
@@ -235,13 +148,47 @@ npm run build:embed        # 产出 dist-embed/
 </script>
 ```
 
-> - 入口 `local-agent.esm.js` 仅 ~131KB；WebLLM 引擎 chunk（~6MB）在首次 `load()` 时按需下载；
->   Transformers.js 后端 chunk 仅在选用 ONNX 模型时加载。
-> - 完整聊天 UI 可参考本仓库 `demo/embed-demo.html`（右下角浮窗示例）。
+> **产物体积**（`npm run build:embed` 实测，随 SDK 版本变化）：
+> - 入口 `local-agent.esm.js` 约 161KB（gzip 43KB）；
+> - WebLLM 引擎 chunk 约 6.3MB（gzip 2.2MB），首次 `load()` 时按需下载；
+> - Transformers.js 后端 chunk 约 63.8MB（gzip 17.6MB），仅在选用 ONNX 模型时加载。
+>
+> 方式二默认需把**整个 `dist-embed/` 目录**（约 70MB）上传到宿主同源路径，请确认静态托管的单文件体积与总容量允许。
+> 两个 chunk 都是运行时动态 `import()`，入口不含 `modulepreload`，不影响页面首屏。
+>
+> **可以省掉 63.8MB 的情况**：仅当宿主只用 WebLLM / MLC 后端（即本项目 `MODEL_OPTIONS` 里的 3 个 `Qwen3.5-*-MLC` 档，
+> 且不会显式 `load()` 任何 Transformers.js（ONNX）模型）时，该 chunk 永远不会被请求，可在部署时不上传
+> `dist-embed/transformers.web-*.js`（按通配匹配，文件名含构建 hash，每次构建都会变；本地构建产物保留，
+> 后续要用随时补传）。反之，一旦加载 `transformers-js` 后端的模型就会按需请求它，缺失将直接 404 导致加载失败。
+> 部署后可自检：F12 → Network，正常对话路径下不应出现 `transformers.web-*.js` 的请求。
+>
+> 完整聊天 UI 可参考本仓库 `demo/embed-demo.html`。
 
----
+**本地联调**：把下面内容保存为 `embed-test.html`，与 `dist-embed/` 放在同一目录，用任意静态服务器打开
+（如 `npx serve .` 或 `python -m http.server`），验证能否跑通：
 
-## 方式三：iframe 嵌入（最省事，零代码）
+```html
+<script type="module">
+  import { createLocalAgent } from "./dist-embed/local-agent.esm.js";
+  const agent = createLocalAgent({
+    onProgress: ({ progress }) => console.log("加载进度", Math.round(progress * 100) + "%"),
+    onReady: () => console.log("✅ 模型已就绪"),
+    onError: (err) => console.error(err),
+  });
+  await agent.ready();
+  await agent.load();               // 首次需下载推荐档（默认约 1.2GB），务必先配好第 2 节的代理
+  const { answer } = await agent.chat("现在几点", {});
+  console.log("回复:", answer);
+</script>
+```
+
+**验证**：
+
+- 自动化：本仓库 `npm run test:embed`（需先起 proxy 与 dev）验证完整浮窗示例；
+- 手动：在页面对话框依次验证时间、计算、记忆三类问题，逐条核对结果；
+- 网络：浏览器 F12 → Network，确认模型文件经 `/hf/...` 返回 200 且无 CORS 报错。
+
+## 5. 方式三：iframe 嵌入（最省事，零代码）
 
 把本项目直接部署为一个独立站点，宿主页面用 iframe 引入：
 
@@ -251,31 +198,27 @@ npm run build:embed        # 产出 dist-embed/
 ```
 
 - 优点：无需任何集成代码，独立迭代。
-- 缺点：样式与交互与宿主页面隔离；需要把模型代理同时部署在 agent 站点（见下文"模型下载代理"）。
+- 缺点：样式与交互与宿主页面隔离；需要把模型代理同时部署在 agent 站点（见第 2 节）。
 
----
+## 6. 模型选择（设备自适应）
 
-## ⚠️ 嵌入前必须处理的三件事
+默认 `modelId: "auto"`：`ready()` 会调用 `ai.probeHardware()` 探测 WebGPU 与核心数，按启发式算法选出档位，
+触发 `onEvent({ type: "model-recommended", modelId, snapshot })`，用户仍可从下拉手动覆盖。宿主想跳过自动选档，
+显式指定即可：
 
-### 1. 模型下载代理（国内网络必需）
+```js
+const agent = createLocalAgent({ modelId: "Qwen3.5-2B-q4f16_1-MLC" });
+```
 
-模型权重托管在 HuggingFace（国内无法直连）。嵌入页面必须能访问同源 `/hf/*`、`/hf-transformers/*`、
-`/gh-raw/*` 路由（`createLocalAgent` 默认 `modelSource: "proxy"` 即请求这些路径）。
+> 传入的 id 必须存在于 SDK 模型目录（`MODEL_PRESETS`）；失效 id 会在 `load()` 时降级到最低可用档并输出 `console.warn`。
 
-| 宿主部署位置 | 方案 |
-| --- | --- |
-| **Vercel** | 在宿主项目加 `vercel.json`（见本仓库），rewrites 转发 `/hf/* → hf-mirror.com`、`/gh-raw/* → jsdelivr` |
-| **Netlify** | 在宿主项目加 `netlify.toml`，200 状态 redirects 透明代理 |
-| **Cloudflare Worker / 自建服务器** | 部署 `server/dev-proxy.mjs`（本仓库），并配置 `proxyOrigin` 指向它 |
-| **完全离线/内网** | 用 `npx serve` 之类静态托管模型文件，或改造代理指向内网镜像 |
+档位清单、自适应规则与新增模型步骤见 `README.md`「模型选择与设备自适应」；元数据定义在
+`src/modelLoader.js` 的 `MODEL_OPTIONS`（tier / sizeMB / minVRAMGB / minCores / recommended）。
 
-> 若宿主域名与代理不同源，`createLocalAgent({ proxyOrigin: "https://proxy.example.com" })`
-> 指向代理；代理需返回 CORS 头（`server/dev-proxy.mjs` 已内置）。
+## 7. 浏览器要求：WebGPU
 
-### 2. 浏览器要求：WebGPU
-
-本地 1B 模型推理需要 WebGPU：Chrome / Edge 最新版（开启硬件加速），建议独立显卡。
-无 GPU 环境会降级为软件渲染，速度很慢或不可用。宿主代码建议先检测：
+本地 1B 模型推理需要 WebGPU：Chrome / Edge 最新版（开启硬件加速），建议独立显卡。无 GPU 环境会降级为
+软件渲染，速度很慢或不可用。宿主代码建议先检测：
 
 ```js
 const agent = createLocalAgent({ onError: (err) => {
@@ -284,40 +227,44 @@ const agent = createLocalAgent({ onError: (err) => {
 await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 ```
 
-### 3. 首次加载体验
+## 8. 首次加载体验
 
-- 首次 `load()` 需下载约 447MB 权重（Qwen3.5-0.8B），**务必把进度回调渲染出来**；
-- 权重缓存在浏览器 IndexedDB / Cache（按域名隔离），二次加载秒级；
-- 建议在 UI 上提示"首次加载较慢，之后秒开"。
+- 首次 `load()` 需下载数百 MB 权重（Qwen3.5-0.8B 约 447MB，默认档 2B 约 1.2GB），**务必把进度回调渲染出来**；
+- 权重缓存在浏览器 Cache / IndexedDB（按域名隔离），二次加载秒级；
+- 建议在 UI 上提示“首次加载较慢，之后秒开”。
 
-### 3.1. Service Worker 行为（宿主须知）
+## 9. Service Worker 行为（宿主须知）
 
 `createLocalAgent()` 在 `ready()` 中会自动注册 `public/sw.js`。注册策略：
 
 | 场景 | 行为 |
 | --- | --- |
-| 正常页面（页面域与嵌入域一致） | ✅ 注册成功，断网 / 跨页面仍可用 |
+| 正常页面（页面域与嵌入域一致） | 注册成功，断网 / 跨页面仍可用 |
 | iframe 嵌入（iframe 加载嵌入脚本） | 取决于宿主页面的 `Content-Security-Policy` / `Service-Worker-Allowed` 头，可能被拒绝 |
-| 跨源 iframe | ❌ 注册失败（浏览器安全策略） |
-| 非 HTTPS / 非 localhost | ❌ 注册失败（SW 强制 HTTPS） |
+| 跨源 iframe | 注册失败（浏览器安全策略） |
+| 非 HTTPS / 非 localhost | 注册失败（SW 强制 HTTPS） |
 | 浏览器不支持 SW（如早期 Safari） | 静默跳过，无任何错误 |
 
-**宿主页面想让 SW 工作**：
-- 主页面（同源直接嵌入方式）✓ 开箱即用
-- iframe 嵌入方式：宿主页面需要添加 `<iframe allow="..." sandbox="...">` 中允许 SW（多数浏览器默认就允许）
-- 跨域嵌入：需把 SW 也部署到宿主页面同源（即把 `public/sw.js` 上传到宿主站点的根路径），并修改 `src/embed.js` 的 `register("/sw.js")` 为实际路径
+- **想让 SW 工作**：同源直接嵌入开箱即用；iframe 场景宿主的 `<iframe allow=... sandbox=...>` 需允许 SW
+  （多数浏览器默认允许）；跨域嵌入需把 `public/sw.js` 上传到宿主站点根路径，并修改 `src/embed.js` 的
+  `register("/sw.js")` 为实际路径。
+- **想禁用 SW**：调用 `navigator.serviceWorker.getRegistrations()` 后 `unregister()`，或 fork `embed.js` 跳过注册。
+- **清除缓存**：宿主可提供按钮调用 `caches.delete("local-agent-models-v2")` 让用户清理磁盘空间
+  （缓存名与策略见 `README.md`「离线缓存」）。
 
-**宿主想禁用 SW**：调用 `navigator.serviceWorker.getRegistrations()` 然后 `unregister()`；或在 `createLocalAgent()` 之前阻止 `ready()` 调用 SW 注册（fork embed.js）。
+## 10. 与宿主页面共存要点
 
-**清除缓存**：宿主页面提供按钮调用 `caches.delete("local-agent-models-v1")` 让用户手动清理磁盘空间（避免权重被 IndexedDB 缓存污染浏览器）。
-
----
-
-## 附：与宿主页面共存要点
-
-- **样式隔离**：`embed.js` 不注入任何样式；浮窗 UI（`demo/embed-demo.html` 的 `#la-*` 选择器）
-  使用带前缀的类名，避免与宿主冲突。也可改用 Shadow DOM 挂载。
-- **无全局污染**：不修改 `window`、不拦截事件；仅占用一个 IndexedDB 数据库
-  `local-llm-agent`（消息历史 + 记忆）。
-- **并发**：`chat()` 有单飞保护（同时只能有一个对话在跑）；`load()` 有单飞保护。
+- **样式隔离**：`embed.js` 不注入任何样式；浮窗 UI（`demo/embed-demo.html` 的 `#la-*` 选择器）使用带前缀的
+  类名，避免与宿主冲突。也可改用 Shadow DOM 挂载。
+- **无全局污染**：不修改 `window`、不拦截事件；仅占用一个 IndexedDB 数据库 `local-llm-agent`（消息历史 + 记忆）。
+- **并发**：`chat()` 与 `load()` 均有单飞保护（同时只能有一个对话 / 一次加载在跑）。
 - **销毁**：页面卸载前调用 `agent.dispose()` 释放 WebGPU 上下文与 worker。
+
+## 11. 上线检查清单
+
+- [ ] 页面能打开且无控制台报错
+- [ ] 「加载模型」进度条 0→100%，二次打开走缓存秒开
+- [ ] 对话流式输出正常，思考过程（Action / Observation）可见
+- [ ] 首次加载提示已呈现（默认档约 1.2GB，请耐心等待）
+- [ ] 不支持 WebGPU 的浏览器有降级提示（`onError` 分支）
+- [ ] 已处理与宿主页面的样式冲突（浮窗类名加前缀或 Shadow DOM）
