@@ -13,10 +13,11 @@
  *       SW 不支持 ESM import，所以这里 inline 复制。每次改一处必须改另一处，
  *       单元测试（tests/unit/swStrategies.test.js）保证两者行为一致。
  *
- * 版本号：升级缓存策略时同步递增 VERSION，activate 阶段会自动清理旧缓存。
+ * 版本号：升级缓存策略或修改了 SW 内任意函数时同步递增 VERSION，activate 阶段会自动清理旧缓存。
+ * 当前 v2：cacheFirst 在 fetch 拿到 4xx/5xx 时改为透传上游响应（之前会替换成 503，掩盖真实错误）。
  */
 
-const VERSION = "v1";
+const VERSION = "v2";
 const MODEL_CACHE = `local-agent-models-${VERSION}`;
 const APP_CACHE = `local-agent-app-${VERSION}`;
 
@@ -50,13 +51,16 @@ async function cacheFirst(req, cacheName) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(req);
   if (cached) return cached;
+  let res;
   try {
-    const res = await fetch(req);
-    if (res && res.ok) cache.put(req, res.clone());
-    return res;
+    res = await fetch(req);
   } catch {
+    // 真正断网（fetch 直接 reject）：返回 503，前端可降级
     return new Response("offline and no cache", { status: 503 });
   }
+  if (res && res.ok) cache.put(req, res.clone());
+  // 上游 4xx/5xx：透传，不吞掉 dev-proxy 的错误信息（让 DevTools 直接看到真实 502）
+  return res;
 }
 
 async function staleWhileRevalidate(req, cacheName) {

@@ -78,7 +78,7 @@
     <div class="cards">
       <div class="card"><h3>产品 A</h3><p>这是原有的页面内容，与智能体互不干扰。</p></div>
       <div class="card"><h3>产品 B</h3><p>嵌入的智能体不依赖任何服务器推理。</p></div>
-      <div class="card"><h3>产品 C</h3><p>首次使用需下载约 447MB 模型并缓存。</p></div>
+      <div class="card"><h3>产品 C</h3><p>首次使用需下载模型并缓存（默认档大小见左侧下拉）。</p></div>
     </div>
     <footer>© 2026 Acme. 示例页面</footer>
 
@@ -144,7 +144,6 @@
       // modelId 默认 "auto"：ready() 探测硬件（WebGPU + 核数）后通过 onEvent 的
       // "model-recommended" 事件告知推荐档，下拉自动切到该项（详见 INTEGRATION.md Step 4）
       let maxProgress = 0;
-      let userPickedModel = false;
 
       const agent = createLocalAgent({
         onEvent: (event) => {
@@ -158,8 +157,9 @@
               break;
             }
             case "model-recommended": {
-              // 硬件推荐档 → 自动切下拉；用户手动改过就不再覆盖
-              if (!userPickedModel) el.modelSelect.value = event.modelId;
+              // 硬件推荐档 → 自动切下拉（推荐事件在 ready() 时触发一次，后续不再触发，
+              // 所以这里直接覆盖即可，不需要"用户手动改过就不再覆盖"的标志位）。
+              el.modelSelect.value = event.modelId;
               const opt = getModelOptions().find((m) => m.id === event.modelId);
               el.modelSelect.title = opt ? `为你的设备推荐：${opt.label}` : "";
               break;
@@ -213,9 +213,6 @@
       }
       // 先选最低档占位；ready() 收到 "model-recommended" 后自动切到推荐档
       el.modelSelect.value = getDefaultModelId();
-      el.modelSelect.addEventListener("change", () => {
-        userPickedModel = true;
-      });
 
       // ---------- 浮窗开关 ----------
       const panel = document.getElementById("la-panel");
@@ -231,8 +228,8 @@
         maxProgress = 0;
         try {
           await agent.ready(); // 幂等：初始化 IndexedDB / 事件 / 硬件探测
-          // 用户手动选过档位就尊重选择，否则传 undefined 让 embed.js 使用硬件推荐档
-          await agent.load(userPickedModel ? el.modelSelect.value : undefined);
+          // 用户当下拉里的值即他们想要的档（默认或手动改后），不强制使用"auto"
+          await agent.load(el.modelSelect.value);
         } catch (err) {
           showError(err?.message ?? String(err));
           el.progressWrap.style.display = "none";

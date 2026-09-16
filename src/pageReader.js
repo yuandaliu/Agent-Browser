@@ -23,7 +23,12 @@ const EXCLUDED_SELECTOR =
 /** selector 命中区域文本低于该长度视为"内容过少"，自动回退整页读取 */
 export const SELECTOR_FALLBACK_MIN_CHARS = 40;
 
-/** 正文候选容器（按优先级） */
+/**
+ * 正文候选容器（pickMainContent 遍历这些 selector，**打分**取分数最高的，
+ * 不是按顺序匹配第一个）。打分逻辑在 scoreCandidate()：
+ *   score = 文本密度（1 - linkText/totalText） × 长度权重（min(total/800, 1.5)）
+ * 分数 >= 0.25 才算"够格"，否则回退到 body 整页读取。
+ */
 const CONTENT_CANDIDATES = [
   "article",
   "main",
@@ -130,6 +135,11 @@ let observerRefCount = 0;
 let popstateHandler = null;
 let pushStatePatched = false;
 let replaceStatePatched = false;
+// 共享 bootstrap 句柄：所有 caller 共用一个 DOMContentLoaded 监听器，
+// 第一次触发时调用 initPageWatcher 创建 observer，避免重复监听或重复 init。
+let sharedBootstrap = null;
+let sharedBootstrapOptions = null; // 第一个 caller 的 { debounceMs, maxChars }
+let pendingCallerCount = 0; // body 未就绪时的 caller 数量（用于 dispose 时是否真 remove）
 
 function refreshCache(maxChars) {
   try {
@@ -161,12 +171,62 @@ export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS
   if (!observer) {
     // body 尚未就绪（脚本在 <head> 中执行，宿主页面常见）时延迟到 DOMContentLoaded
     // 再初始化，避免 observe(null) 抛 TypeError 中断宿主页面初始化流程。
+    // 多 caller 安全：所有 caller 共享一个 DOMContentLoaded 监听器，body 就绪后
+    // 只用第一个 caller 的配置创建 observer（后续 caller 共享这个 observer）。
     if (!document.body) {
-      const bootstrap = () => initPageWatcher({ debounceMs, maxChars });
-      document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+      pendingCallerCount++;
+      if (!sharedBootstrap) {
+        sharedBootstrapOptions = { debounceMs, maxChars };
+        sharedBootstrap = () => {
+          // 关键：触发时把 pendingCallerCount 转成 observerRefCount 的增量，
+          // 让总引用计数 = 实际 caller 数。后续 dispose 走 observer 路径才能正确归零。
+          // 修复前是直接递归 initPageWatcher 再清 sharedBootstrap，observerRefCount
+          // 只记 1 而 pending caller 没被计入，dispose 永远减不到 0 → observer 泄漏。
+          const options = sharedBootstrapOptions;
+          const pending = pendingCallerCount;
+          pendingCallerCount = 0;
+          sharedBootstrap = null;
+          sharedBootstrapOptions = null;
+          if (typeof document !== "undefined" && document.body) {
+            // 递归调用走"body 已就绪"分支，会创建 observer 并 observerRefCount++ (→ 1)
+            initPageWatcher(options);
+            // 把原本 pending 的 caller 数量补上（initPageWatcher 已 +1，这里 +pending-1）
+            observerRefCount += pending - 1;
+          }
+        };
+        document.addEventListener("DOMContentLoaded", sharedBootstrap, { once: true });
+      }
       return {
         getSnapshot: (opts) => getPageSnapshot(opts),
-        dispose: () => document.removeEventListener("DOMContentLoaded", bootstrap),
+        dispose: () => {
+          // 路径 1：observer 已创建（sharedBootstrap 已触发过）→ 按引用计数释放
+          if (observer) {
+            observerRefCount = Math.max(0, observerRefCount - 1);
+            if (observerRefCount === 0) {
+              observer?.disconnect();
+              observer = null;
+              if (refreshTimer) {
+                clearTimeout(refreshTimer);
+                refreshTimer = null;
+              }
+              if (popstateHandler && typeof window !== "undefined") {
+                window.removeEventListener("popstate", popstateHandler);
+                popstateHandler = null;
+              }
+            }
+            return;
+          }
+          // 路径 2：bootstrap 阶段（DOMContentLoaded 还没触发）→ 减 pending 计数，
+          // 全 dispose 时移除共享 listener
+          if (pendingCallerCount > 0) {
+            pendingCallerCount--;
+            if (pendingCallerCount === 0 && sharedBootstrap && typeof document !== "undefined") {
+              document.removeEventListener("DOMContentLoaded", sharedBootstrap);
+              sharedBootstrap = null;
+              sharedBootstrapOptions = null;
+            }
+          }
+        },
       };
     }
     const scheduleRefresh = () => {

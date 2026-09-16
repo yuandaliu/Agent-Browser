@@ -21,10 +21,6 @@
       "destination": "https://hf-mirror.com/$1"
     },
     {
-      "source": "/gh-raw/mlc-ai/binary-mlc-llm-libs/(.*)",
-      "destination": "https://cdn.jsdelivr.net/gh/mlc-ai/binary-mlc-llm-libs@main/$1"
-    },
-    {
       "source": "/gh-raw/([^/]+)/([^/]+)/([^/]+)/(.*)",
       "destination": "https://cdn.jsdelivr.net/gh/$1/$2@$3/$4"
     }

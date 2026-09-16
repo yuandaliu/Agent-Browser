@@ -86,8 +86,10 @@ function handleModelEvent(event) {
       maxProgress = Math.max(maxProgress, pct);
       el.progressBar.style.width = `${maxProgress}%`;
       el.progressPct.textContent = `${maxProgress}%`;
-      if (event.status) el.progressStatus.textContent = event.status;
+      // file（具体分片名）优先级高于 status（通用状态描述），
+      // 因为 file 更贴近用户当前正在下载什么，对调试与透明度更有帮助。
       if (event.file) el.progressStatus.textContent = event.file;
+      else if (event.status) el.progressStatus.textContent = event.status;
       break;
     }
     case "status": {
@@ -99,7 +101,7 @@ function handleModelEvent(event) {
       el.progressPct.textContent = "100%";
       el.progressStatus.textContent = "加载完成";
       el.readyBox.classList.remove("hidden");
-      el.modelBadge.textContent = `已加载：${shortModelName(event.modelId)}`;
+      el.modelBadge.textContent = `已加载：${friendlyModelName(event.modelId)}`;
       el.modelBadge.className = "badge badge-ok";
       // 关键改动：不禁用 loadBtn，让用户能从下拉切换模型后点"重新加载"
       // （之前 disabled=true 会让用户无法换模型重新加载，是核心功能退化）
@@ -119,11 +121,37 @@ function handleModelEvent(event) {
       el.loadBtn.disabled = false;
       break;
     }
+    case "modelunloaded": {
+      // 模型被 unload() 卸载：清空 UI 状态，避免 modelBadge 仍显示旧模型、
+      // sendBtn 还 enabled 但实际模型已不可用（chat 会抛"模型尚未加载"）。
+      // 修复前 modelLoader 漏了 onEvent 透传，这里是补的对应 UI 处理。
+      el.modelBadge.textContent = "未加载模型";
+      el.modelBadge.className = "badge badge-muted";
+      el.readyBox.classList.add("hidden");
+      el.inputBox.disabled = true;
+      el.sendBtn.disabled = true;
+      el.loadBtn.textContent = "加载模型";
+      el.loadBtn.disabled = false;
+      console.log("[app] 模型已卸载:", event.modelId);
+      break;
+    }
   }
 }
 
 function shortModelName(id) {
   return id.split("/").pop() ?? id;
+}
+
+/**
+ * 取模型可读名：优先 MODEL_OPTIONS.label 的主名部分（取括号前，
+ * 主动去掉"~447MB / 1.6GB 显存"等元数据，因为 modelBadge 空间有限，
+ * 完整信息已经在 select 标签里展示了）。
+ * 找不到时降级到 split("/").pop()，再不行原样返回。
+ */
+function friendlyModelName(id) {
+  const opt = getModelOptions().find((m) => m.id === id);
+  if (opt) return opt.label.split("（")[0]; // 取括号前的主名（"Qwen3.5 0.8B"），去掉括号里的元数据
+  return shortModelName(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +163,11 @@ el.loadBtn.addEventListener("click", async () => {
   el.readyBox.classList.add("hidden");
   maxProgress = 0;
   el.progressWrap.classList.remove("hidden");
+  // 显式重置进度条 UI（避免上次加载完成的 100% / "加载完成" 残留显示一帧，
+  // 直到下一个 progress 事件覆盖）
+  el.progressBar.style.width = "0%";
+  el.progressPct.textContent = "0%";
+  el.progressStatus.textContent = "加载中…";
   el.loadBtn.disabled = true;
   el.loadBtn.textContent = "加载中…";
   const modelId = el.modelSelect.value;
@@ -301,6 +334,9 @@ async function handleSend() {
     el.errorBox.classList.remove("hidden");
     return;
   }
+  // 重置上轮可能残留的 steps 块（虽然 finally 已清，但用户快速连发 / 中断时
+  // 仍可能漏掉，这里兜底）
+  endStepsBlock();
 
   sending = true;
   abortController = new AbortController();
@@ -410,3 +446,9 @@ el.newChatBtn.addEventListener("click", async () => {
   el.chatLog.appendChild(welcome);
   console.log("[app] 已清空对话历史");
 });
+
+// ---------------------------------------------------------------------------
+// 纯函数 helper（导出便于单测，不影响运行时）
+// ---------------------------------------------------------------------------
+
+export { shortModelName, friendlyModelName };

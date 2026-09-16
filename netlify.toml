@@ -1,31 +1,37 @@
 [build]
-  command = "npm run build"
-  publish = "dist"
+command = "npm run build"
+publish = "dist"
 
 [build.environment]
-  # 生产环境无需本地代理（平台 rewrites 直接转发到镜像）
+# 生产环境无需本地代理（平台 rewrites 直接转发到镜像）
 
 [[headers]]
-  for = "/*"
-  [headers.values]
-    Cross-Origin-Opener-Policy = "same-origin"
-    Cross-Origin-Embedder-Policy = "require-corp"
+for = "/*"
+[headers.values]
+Cross-Origin-Opener-Policy = "same-origin"
+Cross-Origin-Embedder-Policy = "require-corp"
 
 # 模型下载代理：页面同源 /hf*、/gh-raw* 路由 → 国内可访问镜像
+# fallback 说明：Netlify redirects 是单上游，没法用平台原生配置做多上游 fallback。
+# 本地开发推荐用 server/dev-proxy.mjs（已支持 hf-mirror.com → hf-api.cn → ghproxy 三层 fallback）。
+# 生产环境如需自动 fallback，需替换为 Netlify Function。
 [[redirects]]
-  from = "/hf/*"
-  to = "https://hf-mirror.com/:splat"
-  status = 200
-  force = true
+from = "/hf/*"
+to = "https://hf-mirror.com/:splat"
+status = 200
+force = true
 
 [[redirects]]
-  from = "/hf-transformers/*"
-  to = "https://hf-mirror.com/:splat"
-  status = 200
-  force = true
+from = "/hf-transformers/*"
+to = "https://hf-mirror.com/:splat"
+status = 200
+force = true
 
+# gh-raw 通用规则（不再硬编码 mlc-ai/binary-mlc-llm-libs 仓库，避免 WebLLM 升级到
+# 别的 wasm 库后这条规则静默 broken）。所有 /gh-raw/{owner}/{repo}/{branch}/{rest}
+# 形式都转发到 jsdelivr gh 路由。
 [[redirects]]
-  from = "/gh-raw/mlc-ai/binary-mlc-llm-libs/*"
-  to = "https://cdn.jsdelivr.net/gh/mlc-ai/binary-mlc-llm-libs@main/:splat"
-  status = 200
-  force = true
+from = "/gh-raw/*"
+to = "https://cdn.jsdelivr.net/gh/:splat"
+status = 200
+force = true

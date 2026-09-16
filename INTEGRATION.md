@@ -53,7 +53,7 @@ import { createLocalAgent } from "./embed.js";
 const agent = createLocalAgent({
   // modelId 留空或传 "auto"：ready() 内部探测硬件（WebGPU + 核数），
   // 通过 onEvent 的 "model-recommended" 事件告知推荐档位，下拉自动切到该项
-  // modelId: "auto",   // ← 默认值；可显式指定如 "Llama-3.2-3B-Instruct-q4f16_1-MLC"
+  // modelId: "auto",   // ← 默认值；可显式指定如 "Qwen3.5-2B-q4f16_1-MLC"
   onProgress: ({ progress, status }) => {
     bar.style.width = `${Math.round(progress * 100)}%`;   // 渲染进度条
   },
@@ -86,8 +86,9 @@ sendBtn.onclick = async () => {
 2. 根据启发式算法推荐最合适的模型档：
    - 不支持 WebGPU → `Qwen3.5-0.8B`（最低门槛）
    - 2 核以下 → 同上
-   - 4 核 → `Llama-3.2-3B-Instruct`（推荐档 ⭐）
-   - 8 核及以上 → 优先 `Qwen3.5-4B`，回退 3B
+   - 4 核 → `Qwen3.5-2B`（推荐档 ⭐，带 `recommended: true`）
+   - 8 核及以上 → 命中带 `recommended` 标记的档（仍是 Qwen3.5-2B）；
+                想"高核直接上 ultra"可把 `Qwen3.5-4B` 也标 `recommended: true`
 3. 触发 `onEvent({ type: "model-recommended", modelId, snapshot })`
 4. 用户可从下拉里手动覆盖
 
@@ -112,7 +113,7 @@ const agent = createLocalAgent({ modelId: "Qwen3.5-2B-q4f16_1-MLC" });
     onError: (err) => console.error(err),
   });
   await agent.ready();
-  await agent.load();               // 首次需下载 447MB，务必先配好 Step 3 的代理
+  await agent.load();               // 首次需下载推荐档（默认 Qwen3.5 2B 约 1.2GB），务必先配好 Step 3 的代理
   const { answer } = await agent.chat("现在几点", {});
   console.log("回复:", answer);
 </script>
@@ -127,7 +128,7 @@ const agent = createLocalAgent({ modelId: "Qwen3.5-2B-q4f16_1-MLC" });
 - [ ] 页面能打开且无控制台报错
 - [ ] 「加载模型」进度条 0→100%，二次打开走缓存秒开
 - [ ] 对话流式输出正常，思考过程（Action/Observation）可见
-- [ ] 首次加载提示已呈现（"约 447MB，请耐心等待"）
+- [ ] 首次加载提示已呈现（默认档约 1.2GB，请耐心等待）
 - [ ] 不支持 WebGPU 的浏览器有降级提示（`onError` 分支）
 - [ ] 已处理与宿主页面的样式冲突（浮窗类名加前缀或 Shadow DOM）
 
@@ -170,7 +171,7 @@ const agent = createLocalAgent({
 await agent.ready();
 
 // 用户点击"加载模型"
-await agent.load(); // 默认 Qwen3.5-0.8B，也可 agent.load("gemma3-1b-it-q4f16_1-MLC")
+await agent.load(); // 默认走 ready() 推荐档（Qwen3.5-2B），也可显式指定如 agent.load("Qwen3.5-4B-q4f16_1-MLC")
 
 // 用户发送消息
 const { answer } = await agent.chat("现在几点", {
@@ -200,9 +201,9 @@ const { answer } = await agent.chat("现在几点", {
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `modelId` | Qwen3.5-0.8B | 默认模型（`getDefaultModelId()`） |
+| `modelId` | `"auto"` → Qwen3.5-2B | 同步 fallback 为 Qwen3.5-0.8B；`ready()` 后按硬件推荐为 Qwen3.5-2B |
 | `modelSource` | `"proxy"` | `"proxy"` 走同源路由下载；`"direct"` 直连 HuggingFace |
-| `proxyOrigin` | 页面同源 | 代理服务 origin |
+| `proxyOrigin` | 本地 127.0.0.1 / 托管页面同源 | 本地强制 IPv4 loopback；远程部署用 `location.origin` |
 | `verifyProxy` | 本地 true / 托管 false | 是否探测代理健康 |
 | `maxSteps` | 5 | ReAct 最大循环步数 |
 | `onProgress` / `onStatus` / `onReady` / `onError` | — | 加载事件回调 |

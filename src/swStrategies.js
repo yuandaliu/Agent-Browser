@@ -47,6 +47,11 @@ export function isAppChunkRequest(url) {
  * Cache-first：命中即用，未命中走网络并缓存。
  * 适用：模型权重（不变的大文件）。
  *
+ * 关键：fetch 拿到响应（不论 2xx/4xx/5xx）一律透传给调用方，不吞错。
+ * 之前在 catch 里统一返回 503 会掩盖 dev-proxy 的 502 真实错误，调试时只看得到
+ * "offline and no cache" 而不知道上游到底发生了什么；改成只在 fetch 直接 reject
+ * （真断网/网络层失败）时才返回 503。
+ *
  * @param {Request} req - 原始请求
  * @param {string} cacheName - Cache Storage 名称
  * @param {object} caches - Cache Storage 客户端（生产环境是全局 self.caches）
@@ -56,14 +61,16 @@ export async function cacheFirst(req, cacheName, caches, fetchImpl = globalThis.
   const cache = await caches.open(cacheName);
   const cached = await cache.match(req);
   if (cached) return cached;
+  let res;
   try {
-    const res = await fetchImpl(req);
-    if (res && res.ok) cache.put(req, res.clone());
-    return res;
+    res = await fetchImpl(req);
   } catch {
-    // 完全离线且无缓存：返回 503（前端可降级）
+    // fetch 直接 reject（断网 / 网络层失败）且无缓存：返回 503，前端可降级
     return new Response("offline and no cache", { status: 503 });
   }
+  if (res && res.ok) cache.put(req, res.clone());
+  // 上游 4xx/5xx 透传，不入缓存也不吞错（DevTools 能直接看到 dev-proxy 的 502 body）
+  return res;
 }
 
 /**

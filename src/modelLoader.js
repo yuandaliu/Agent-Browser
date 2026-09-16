@@ -9,8 +9,19 @@
  * 模型元数据（MODEL_OPTIONS）：每个选项含 tier / sizeMB / minVRAMGB / minCores / recommended
  * 字段，recommendModelId() 根据硬件能力自适应推荐默认档。
  *
- * createModelLoader({ browserAI, onEvent }) → { load, unload, isBusy, getModelId }
- * onEvent: ({ type: 'progress'|'status'|'ready'|'error'|'hardware', ... }) => void
+ * 国内开源策略：只列出 @missionsquad/browserai SDK 目录里"国内开源"的 WebLLM 文本
+ * 模型。当前 SDK 目录里满足条件的只有阿里 Qwen3.5 系列；Gemma / Llama / Hermes 等国外
+ * 模型直接砍掉，避免触发对 huggingface.co 直连的下载路径。
+ *
+ * createModelLoader({ browserAI, onEvent }) → {
+ *   load(modelId?)           // 加载指定模型（默认 FALLBACK_MODEL_ID），成功返回 textModel()
+ *   unload()                 // 卸载所有已加载模型，释放显存/WebGPU 上下文
+ *   isBusy()                 // 当前是否有加载任务正在进行
+ *   getLoadedModelId()       // 返回当前已加载的模型 ID，未加载返回 null
+ *   checkHardware()          // 探测 WebGPU + 核心数（不抛错，但不支持 WebGPU 会抛）
+ *   dispose()                // 移除所有 SDK 事件订阅
+ * }
+ * onEvent: ({ type: 'progress'|'status'|'ready'|'error'|'hardware'|'modelunloaded', ... }) => void
  */
 
 const MODEL_OPTIONS = [
@@ -22,47 +33,17 @@ const MODEL_OPTIONS = [
     minVRAMGB: 1.6,
     minCores: 2,
     recommended: false,
-    description: "速度优先，能力受限，适合老旧设备",
-  },
-  {
-    id: "gemma3-1b-it-q4f16_1-MLC",
-    label: "Gemma 3 1B（最低显存，~580MB / 711MB 显存）",
-    tier: "low",
-    sizeMB: 580,
-    minVRAMGB: 0.8,
-    minCores: 2,
-    recommended: false,
-    description: "显存门槛最低的兜底档，中文能力弱于 Qwen",
+    description: "速度优先，能力受限，适合老旧设备（最低显存兜底）",
   },
   {
     id: "Qwen3.5-2B-q4f16_1-MLC",
-    label: "Qwen3.5 2B（轻量，~1.2GB / 2.2GB 显存）",
-    tier: "mid",
+    label: "Qwen3.5 2B（推荐，~1.2GB / 2.2GB 显存）",
+    tier: "high",
     sizeMB: 1200,
     minVRAMGB: 2.2,
     minCores: 4,
-    recommended: false,
-    description: "入门级 2B，速度与能力初步平衡",
-  },
-  {
-    id: "Llama-3.2-3B-Instruct-q4f16_1-MLC",
-    label: "Llama 3.2 3B（推荐，~1.8GB / 4GB 显存）",
-    tier: "high",
-    sizeMB: 1800,
-    minVRAMGB: 4,
-    minCores: 4,
     recommended: true,
-    description: "速度与能力平衡，主流 PC 推荐档",
-  },
-  {
-    id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
-    label: "Hermes 3 Llama 3B（结构化输出更稳，~1.8GB / 2.2GB 显存）",
-    tier: "high",
-    sizeMB: 1800,
-    minVRAMGB: 2.2,
-    minCores: 4,
-    recommended: false,
-    description: "Hermes 调优版，工具调用/JSON 输出更稳定",
+    description: "速度与中文/工具调用能力平衡，国内开源主流档（默认推荐）",
   },
   {
     id: "Qwen3.5-4B-q4f16_1-MLC",
@@ -76,8 +57,10 @@ const MODEL_OPTIONS = [
   },
 ];
 
-// 同步 fallback：probeHardware 之前的兜底默认（最低档，确保任意设备都能加载）
-const FALLBACK_MODEL_ID = MODEL_OPTIONS.find((m) => m.tier === "low").id;
+// 同步 fallback：probeHardware 之前的兜底默认（最低档，确保任意设备都能加载）。
+// 找不到 "low" tier 时回退到第一项，再不行用空串（让 SDK 自行 UnknownModelError 报错）。
+const FALLBACK_MODEL_ID =
+  MODEL_OPTIONS.find((m) => m.tier === "low")?.id ?? MODEL_OPTIONS[0]?.id ?? "";
 
 /**
  * 获取全部模型选项（含元数据）。
@@ -99,10 +82,14 @@ export function getDefaultModelId() {
  * 根据硬件能力推荐最合适的模型 ID。
  *
  * 决策逻辑（保守偏低端，确保不会选到跑不动的档）：
- *   1. 不支持 WebGPU → low
- *   2. 4 核以下   → low
- *   3. 4 核（含 navigator.hardwareConcurrency 启发式）→ 推荐 "high" 中带 recommended 标记的（Llama 3.2 3B）
- *   4. 8 核及以上 → ultra（4B）
+ *   1. 不支持 WebGPU → low 档
+ *   2. 4 核以下       → low 档
+ *   3. 4 核及以上     → 候选 ultra → high → low，优先带 recommended 标记的（Qwen3.5 2B）
+ *   4. 8 核及以上     → 候选顺序不变，但 high 档有 recommended 时仍优先 high；
+ *                       若想让高核机器直接上 ultra，可把 Qwen3.5-4B 也标 recommended。
+ *
+ * 注意：候选 tier 顺序是从 MODEL_OPTIONS 实际存在的 tier 动态推导的，
+ * 不再硬编码 mid 这种可能不存在的 tier。删除/新增 tier 后无需改本函数。
  *
  * @param {object} snapshot - 来自 ai.probeHardware() 的结果（含 webgpuSupported / webgpuReason 等）
  * @returns {string} 模型 ID（保证在 MODEL_OPTIONS 中存在）
@@ -116,15 +103,11 @@ export function recommendModelId(snapshot) {
   // 2) 启发式硬件能力（navigator.hardwareConcurrency 不可用时默认 4）
   const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
 
-  // 3) 决策候选档位（高 → 低）
-  let tiers;
-  if (cores >= 8) {
-    tiers = ["ultra", "high", "mid", "low"];
-  } else if (cores >= 4) {
-    tiers = ["high", "mid", "low"];
-  } else {
-    tiers = ["low"];
-  }
+  // 3) 按当前 MODEL_OPTIONS 实际存在的 tier 推导优先级（高 → 低）。
+  //    避免硬编码 tier 字符串，MODEL_OPTIONS 增删 tier 后本函数自动适配。
+  const existingTiers = new Set(MODEL_OPTIONS.map((m) => m.tier));
+  const orderedTiers = ["ultra", "high", "low"].filter((t) => existingTiers.has(t));
+  const tiers = cores >= 4 ? orderedTiers : ["low"].filter((t) => existingTiers.has(t));
 
   // 4) 按 tier 优先级选：优先带 recommended 标记的，否则选该 tier 的第一个
   for (const tier of tiers) {
@@ -210,6 +193,8 @@ export function createModelLoader({ browserAI, onEvent = () => {} }) {
     browserAI.on("modelunloaded", ({ modelId }) => {
       if (loadedModelId === modelId) loadedModelId = null;
       console.log(`[model-loader] 已卸载: ${modelId}`);
+      // 透传给 UI：之前漏掉 onEvent，导致 modelBadge / sendBtn 卸载后状态不更新
+      onEvent({ type: "modelunloaded", modelId });
     }),
   ];
 

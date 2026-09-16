@@ -204,7 +204,7 @@
       <!-- 加载区（模型未就绪时显示） -->
       <div id="panel-load" class="panel-load">
         <div class="start-row">
-          <div class="start-tip">模型完全在浏览器中运行（WebGPU）。首次加载需下载约 447MB，之后秒开。</div>
+          <div class="start-tip">模型完全在浏览器中运行（WebGPU）。首次加载默认下载 Qwen3.5 2B（约 1.2GB），之后秒开。</div>
           <button id="start-btn" class="start-btn" type="button">🧠 启动本地智能体</button>
         </div>
         <div id="progress-wrap" class="progress-track" style="display:none">
@@ -305,7 +305,7 @@
         startBtn.textContent = "加载中…";
         progressWrap.style.display = "block";
         progressMeta.style.display = "flex";
-        panelStatus.textContent = "正在下载并加载 1B 模型（首次约 447MB）…";
+        panelStatus.textContent = "正在下载并加载 Qwen3.5 2B 模型（首次约 1.2GB）…";
         try {
           await agent.ready();
           await agent.load();

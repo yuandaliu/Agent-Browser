@@ -6,7 +6,7 @@
  *
  *   const agent = createLocalAgent({ onProgress, onReady, onError });
  *   await agent.ready();          // 初始化（IndexedDB + 事件 + 硬件探测）
- *   await agent.load();           // 加载 1B 模型（进度回调 0-100）
+ *   await agent.load();           // 加载默认推荐档（Qwen3.5 2B，进度回调 0-100）
  *   const { answer } = await agent.chat("现在几点", { onStep, onDelta });  // 对话
  *   await agent.clearHistory();   // 新对话
  *
@@ -82,9 +82,21 @@ export function createLocalAgent(options = {}) {
   const isLocal =
     typeof location !== "undefined" && LOCAL_HOSTS.includes(location.hostname);
 
+  // 本地开发时强制把 proxyOrigin 锁成 IPv4 loopback（127.0.0.1），
+  // 避免 location.origin 是 "http://localhost:5189" 时浏览器把 localhost 解析到
+  // ::1（IPv6），而 Vite 只监听 127.0.0.1，导致 fetch /hf/* 直接连不上。
+  // 远程部署（非 isLocal）则保留用户指定的 proxyOrigin，否则让 BrowserAI 默认走
+  // 当前页面 origin（Vercel/Netlify 等托管平台就是这种情况）。
+  const defaultProxyOrigin =
+    typeof location !== "undefined" && isLocal
+      ? `${location.protocol}//127.0.0.1:${location.port}`
+      : typeof location !== "undefined"
+        ? location.origin
+        : undefined;
+
   const ai = new BrowserAI({
     modelSource,
-    proxyOrigin,
+    proxyOrigin: proxyOrigin ?? defaultProxyOrigin,
     verifyProxy: verifyProxy ?? (modelSource === "proxy" ? isLocal : false),
     cacheBackend: "indexeddb",
     webllm: { logLevel: "INFO" },
@@ -235,6 +247,8 @@ export function createLocalAgent(options = {}) {
   async function chat(text, { onStep, onDelta, signal } = {}) {
     if (typeof text !== "string" || !text.trim()) throw new Error("chat: 输入不能为空");
     if (chatting) throw new Error("chat: 已有对话正在进行");
+    // 兼容：即使调用方忘了先 ready()，chat 也应自动兜底（幂等 ready）
+    await ready();
     if (!loader.getLoadedModelId()) {
       throw new Error("模型尚未加载，请先调用 load()");
     }
@@ -255,9 +269,12 @@ export function createLocalAgent(options = {}) {
           maxSteps,
           systemExtras,
           signal,
+          // 不传 runtime：让 SDK 完全使用当前加载模型的 preset.defaultRuntime
+          // （含 maxTokens / temperature / topP / repetitionPenalty / disableThinking）。
+          // 这样切到不同 tier（Qwen3.5 0.8B/2B/4B）时自动应用各自最优参数，
+          // 不再硬编码 768 tokens 覆盖 preset 推荐值（0.8B 默认 512、2B 默认 640、4B 默认 768）。
           generate: async (messages, generateCallbacks) =>
             ai.generateText(messages, {
-              runtime: { maxTokens: 768 },
               onDelta: generateCallbacks.onDelta ?? onDelta,
               signal: generateCallbacks.signal,
             }),
@@ -295,13 +312,22 @@ export function createLocalAgent(options = {}) {
         throw err;
       }
       if (result.ok !== false) {
-        // 成功的回答落库到 IndexedDB 持久化历史
-        await memory.addMessage("assistant", result.answer);
+        // 成功的回答落库到 IndexedDB 持久化历史（addMessage 失败仅 warn，不阻断对话）
+        try {
+          await memory.addMessage("assistant", result.answer);
+        } catch (err) {
+          console.warn("[embed] 落库 assistant 失败:", err?.message ?? err);
+        }
       } else {
         // 失败对话（aborted / loop / max_steps / error）：
         //   1. 落库 assistant（占位如"（已中止）"），保持历史连贯（否则下次 chat 会看到孤儿 user 消息）
         //   2. 记到 failureLog（localStorage，最近 20 条），便于调试
-        await memory.addMessage("assistant", result.answer);
+        // 关键：addMessage 包 try/catch，避免 IndexedDB 满等异常导致 failureLog.record 丢失。
+        try {
+          await memory.addMessage("assistant", result.answer);
+        } catch (err) {
+          console.warn("[embed] 失败对话落库 assistant 失败:", err?.message ?? err);
+        }
         failureLog.record({
           userInput: text,
           ok: false,

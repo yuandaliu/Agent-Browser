@@ -49,7 +49,8 @@ describe("MODEL_OPTIONS — 模型元数据", () => {
       expect(opt).toHaveProperty("minCores");
       expect(opt).toHaveProperty("recommended");
       expect(opt).toHaveProperty("description");
-      expect(["low", "mid", "high", "ultra"]).toContain(opt.tier);
+      // 当前 MODEL_OPTIONS 实际存在的 tier 集合（已砍掉 mid）
+      expect(["low", "high", "ultra"]).toContain(opt.tier);
     }
   });
 
@@ -73,18 +74,25 @@ describe("MODEL_OPTIONS — 模型元数据", () => {
       expect(catalogIds.has(opt.id)).toBe(true);
     }
   });
+
+  it("MODEL_OPTIONS 全为国内开源：仅含 Qwen3.5 系列（无 Gemma / Llama / Hermes）", () => {
+    const ids = getModelOptions().map((m) => m.id);
+    for (const blocked of ["gemma", "llama", "hermes", "mistral", "phi", "olmo"]) {
+      expect(ids.some((id) => id.toLowerCase().includes(blocked))).toBe(false);
+    }
+  });
 });
 
 describe("getAvailableModelOptions — SDK 目录过滤", () => {
   it("过滤掉不在 SDK 目录中的选项", () => {
     const presets = [
       { id: "Qwen3.5-0.8B-q4f16_1-MLC" },
-      { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC" },
+      { id: "Qwen3.5-2B-q4f16_1-MLC" },
     ];
     const available = getAvailableModelOptions(presets);
     expect(available.map((m) => m.id)).toEqual([
       "Qwen3.5-0.8B-q4f16_1-MLC",
-      "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+      "Qwen3.5-2B-q4f16_1-MLC",
     ]);
   });
 
@@ -134,23 +142,25 @@ describe("recommendModelId — 设备自适应推荐", () => {
     expect(opt.tier).toBe("low");
   });
 
-  it("WebGPU 支持 + 8 核及以上 → 选带 recommended 标记的（Llama-3.2-3B）", () => {
+  it("WebGPU 支持 + 8 核及以上 → 选带 recommended 标记的（Qwen3.5-2B）", () => {
     setCores(8);
     const id = recommendModelId({ webgpuSupported: true });
-    expect(id).toBe("Llama-3.2-3B-Instruct-q4f16_1-MLC");
+    expect(id).toBe("Qwen3.5-2B-q4f16_1-MLC");
   });
 
-  it("WebGPU 支持 + 16 核 → 优先 ultra（4B），无 ultra 才退回 high", () => {
+  it("WebGPU 支持 + 16 核 → 命中带 recommended 标记的档（与 8 核同源：Qwen3.5-2B）", () => {
+    // 当前推荐档在 high 档上（Qwen3.5-2B）；cores 越多仍优先走带 recommended 标记的档。
+    // 想要"高核=ultra 档"，需把 Qwen3.5-4B 也标 recommended，或改 recommendModelId 优先级。
     setCores(16);
     const id = recommendModelId({ webgpuSupported: true });
     const opt = getModelOptions().find((m) => m.id === id);
-    expect(["ultra", "high"]).toContain(opt.tier);
-    expect(opt.recommended).toBe(true); // 推荐档
+    expect(opt.recommended).toBe(true);
   });
 
-  it("WebGPU 支持 + 4 核 → high（3B 推荐档）", () => {
+  it("WebGPU 支持 + 4 核 → high 推荐档（Qwen3.5-2B）", () => {
     setCores(4);
     const id = recommendModelId({ webgpuSupported: true });
+    expect(id).toBe("Qwen3.5-2B-q4f16_1-MLC");
     const opt = getModelOptions().find((m) => m.id === id);
     expect(opt.tier).toBe("high");
     expect(opt.recommended).toBe(true);

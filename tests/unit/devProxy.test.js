@@ -12,31 +12,35 @@ describe("buildUpstreamCandidates — 路由映射", () => {
     expect(buildUpstreamCandidates(reqUrl)).toEqual([]);
   });
 
-  it("/hf/{owner}/{repo}/... 映射到 hf-mirror.com 单上游", () => {
+  it("/hf/{owner}/{repo}/... 映射到多个 hf 镜像（默认 hf-mirror.com 优先）", () => {
     const reqUrl = new URL("http://localhost/hf/Qwen/Qwen3-5/config.json");
     const candidates = buildUpstreamCandidates(reqUrl);
-    expect(candidates).toHaveLength(1);
+    expect(candidates.length).toBeGreaterThanOrEqual(2);
+    // 第一候选仍是 hf-mirror.com（保持向后兼容）
     expect(candidates[0].href).toBe("https://hf-mirror.com/Qwen/Qwen3-5/config.json");
+    // 至少存在一个非 hf-mirror.com 的 fallback 候选
+    expect(candidates.some((u) => u.host !== "hf-mirror.com")).toBe(true);
   });
 
-  it("/hf-transformers 同样映射到 hf-mirror.com 单上游", () => {
+  it("/hf-transformers 同样映射到多个 hf 镜像", () => {
     const reqUrl = new URL("http://localhost/hf-transformers/owner/repo/model.onnx");
     const candidates = buildUpstreamCandidates(reqUrl);
-    expect(candidates).toHaveLength(1);
+    expect(candidates.length).toBeGreaterThanOrEqual(2);
     expect(candidates[0].href).toBe("https://hf-mirror.com/owner/repo/model.onnx");
+    expect(candidates.some((u) => u.host !== "hf-mirror.com")).toBe(true);
   });
 
-  it("/gh-raw/{owner}/{repo}/{branch}/{rest} 返回 jsdelivr + jsdmirror 多上游 fallback", () => {
+  it("/gh-raw/{owner}/{repo}/{branch}/{rest} 返回 jsdelivr + jsdmirror + ghproxy 多上游 fallback", () => {
     const reqUrl = new URL("http://localhost/gh-raw/mlc-ai/binary-mlc-llm-libs/main/wasm/model.wasm");
     const candidates = buildUpstreamCandidates(reqUrl);
-    expect(candidates.length).toBeGreaterThanOrEqual(2);
+    expect(candidates.length).toBeGreaterThanOrEqual(3);
     // 第一个候选必须是 jsdelivr（保持向后兼容）
     expect(candidates[0].host).toBe("cdn.jsdelivr.net");
     expect(candidates[0].href).toBe(
       "https://cdn.jsdelivr.net/gh/mlc-ai/binary-mlc-llm-libs@main/wasm/model.wasm",
     );
-    // 至少存在一个非 jsdelivr 候选
-    expect(candidates.some((u) => u.host !== "cdn.jsdelivr.net")).toBe(true);
+    // 至少存在两个非 jsdelivr 候选（jsdmirror + ghproxy）
+    expect(candidates.filter((u) => u.host !== "cdn.jsdelivr.net").length).toBeGreaterThanOrEqual(2);
   });
 
   it("/gh-raw 缺少 branch 段返回 []", () => {

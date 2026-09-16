@@ -5,13 +5,14 @@
  * /gh-raw/*，本服务器把这些路径转发到国内可访问的镜像，解决 huggingface.co /
  * raw.githubusercontent.com 被墙的问题：
  *
- *   /hf/{owner}/{repo}/...            → https://hf-mirror.com/{owner}/{repo}/...
- *   /hf-transformers/{owner}/{repo}/… → https://hf-mirror.com/{owner}/{repo}/…
- *   /gh-raw/{owner}/{repo}/{branch}/… → 多个 jsdelivr 镜像依次回退（见 GH_RAW_UPSTREAMS）
+ *   /hf/{owner}/{repo}/...            → 多个 hf 镜像依次回退（默认 hf-mirror.com → hf-api.cn）
+ *   /hf-transformers/{owner}/{repo}/… → 多个 hf 镜像依次回退（同上）
+ *   /gh-raw/{owner}/{repo}/{branch}/… → 多个 jsdelivr 镜像依次回退（默认 jsdelivr → jsdmirror → ghproxy）
  *   /__worker-health                  → 健康检查（BrowserAI verifyProxy 使用）
  *
- * 为什么 gh-raw 要多上游？国内访问 cdn.jsdelivr.net 经常抽风（30s 握手都连不上），
- * 探测就会以 502 失败。多上游 fallback 让 dev-proxy 自动换镜像继续探测。
+ * 为什么多上游？单镜像在国内访问稳定性差：cdn.jsdelivr.net 一被 QoS 限速就 30s 握手失败，
+ * hf-mirror.com 也偶发 5xx。多上游 fallback 让 dev-proxy 自动换镜像继续探测/下载，
+ * 避免整次加载被一次上游抖动卡死。
  *
  * 用法：node server/dev-proxy.mjs [端口]   （默认 8787）
  * 页面开发时由 vite.config.js 把 /hf* /gh-raw* 等路径代理到本服务器，保持页面同源。
@@ -19,7 +20,8 @@
  * 环境变量：
  *   PROXY_PORT       监听端口（默认 8787）
  *   PROXY_TOKEN      设置后所有请求必须带 X-Proxy-Token 头或 ?token= 参数
- *   GH_RAW_UPSTREAMS 自定义 gh-raw 上游列表（空格分隔），覆盖默认 [jsdelivr, jsdmirror]
+ *   GH_RAW_UPSTREAMS 自定义 gh-raw 上游列表（空格分隔），覆盖默认 [jsdelivr, jsdmirror, ghproxy]
+ *   HF_UPSTREAMS     自定义 hf 上游列表（空格分隔），覆盖默认 [hf-mirror.com, hf-api.cn]
  */
 import http from "node:http";
 import https from "node:https";
@@ -32,9 +34,10 @@ const WORKER_HEADER = "browserai-proxy/dev";
 const PROXY_TOKEN = process.env.PROXY_TOKEN ?? "";
 
 // ---------- gh-raw 多上游 fallback ----------
-// 顺序尝试：cdn.jsdelivr.net → cdn.jsdmirror.com（jsdelivr 国内镜像，URL 格式完全兼容）。
+// 顺序尝试：cdn.jsdelivr.net → cdn.jsdmirror.com → mirror.ghproxy.com
+// （jsdelivr 国内镜像，URL 格式完全兼容）。
 // 可通过 GH_RAW_UPSTREAMS 环境变量（空格分隔）覆盖。
-const DEFAULT_GH_RAW_UPSTREAMS = ["cdn.jsdelivr.net", "cdn.jsdmirror.com"];
+const DEFAULT_GH_RAW_UPSTREAMS = ["cdn.jsdelivr.net", "cdn.jsdmirror.com", "mirror.ghproxy.com"];
 function getGhRawUpstreams() {
   const env = process.env.GH_RAW_UPSTREAMS;
   if (env) {
@@ -42,6 +45,21 @@ function getGhRawUpstreams() {
     if (list.length > 0) return list;
   }
   return DEFAULT_GH_RAW_UPSTREAMS;
+}
+
+// ---------- hf / hf-transformers 多上游 fallback ----------
+// 顺序尝试：hf-mirror.com → hf-api.cn。
+// 之前的单上游 hf-mirror.com 国内访问偶发超时/限速，会让整次下载失败。
+// 加 hf-api.cn（huggingface 镜像）作为 fallback，单镜像挂掉时自动切下一个。
+// 可通过 HF_UPSTREAMS 环境变量（空格分隔）覆盖。
+const DEFAULT_HF_UPSTREAMS = ["hf-mirror.com", "hf-api.cn"];
+function getHfUpstreams() {
+  const env = process.env.HF_UPSTREAMS;
+  if (env) {
+    const list = env.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    if (list.length > 0) return list;
+  }
+  return DEFAULT_HF_UPSTREAMS;
 }
 
 function checkAccess(req, reqUrl) {
@@ -57,8 +75,8 @@ function checkAccess(req, reqUrl) {
  * 返回一组有序的上游候选 URL（按 fallback 顺序）。
  * 空数组表示该路径没有匹配的路由（调用方应回 404）。
  *
- * - /hf、/hf-transformers：单上游 hf-mirror.com
- * - /gh-raw：多上游 fallback（见 getGhRawUpstreams()）
+ * - /hf、/hf-transformers：多上游 fallback（见 getHfUpstreams()），默认 hf-mirror.com → hf-api.cn
+ * - /gh-raw：多上游 fallback（见 getGhRawUpstreams()），默认 jsdelivr → jsdmirror → ghproxy
  */
 export function buildUpstreamCandidates(reqUrl) {
   let pathname;
@@ -72,8 +90,9 @@ export function buildUpstreamCandidates(reqUrl) {
   const [kind, ...rest] = parts;
 
   if (kind === "hf" || kind === "hf-transformers") {
-    // /hf/{owner}/{repo}/... → https://hf-mirror.com/{owner}/{repo}/...
-    return [new URL(`https://hf-mirror.com/${rest.map(encodeURIComponent).join("/")}${reqUrl.search}`)];
+    // /hf/{owner}/{repo}/... → 多个 huggingface 镜像依次回退（默认 hf-mirror.com → hf-api.cn）
+    const pathTail = `${rest.map(encodeURIComponent).join("/")}${reqUrl.search}`;
+    return getHfUpstreams().map((host) => new URL(`https://${host}/${pathTail}`));
   }
   if (kind === "gh-raw") {
     // /gh-raw/{owner}/{repo}/{branch}/{rest} → 多个 jsdelivr 镜像依次回退
@@ -163,6 +182,9 @@ async function requestUpstreamFallback(upstreams, method, headers) {
     }
     const status = res.statusCode ?? 0;
     if (status >= 200 && status < 500) {
+      // 4xx 也是客户端/上游资源问题（如 huggingface repo 不存在、文件 404），
+      // 不切上游；释放 socket 避免连接泄漏（之前漏掉 resume，长时间高并发会泄漏 FD）。
+      res.resume();
       return { response: res, upstream, errors };
     }
     // 5xx：读取并丢弃 body 以释放连接，再切下一个上游
@@ -181,6 +203,10 @@ async function requestUpstreamFallback(upstreams, method, headers) {
   err.upstreamErrors = errors;
   throw err;
 }
+
+// 仅供单测：暴露多上游调度相关函数。
+// 模块顶层仍有 if (isMainModule) server.listen() 守护，单测 import 不会启动 server。
+export { requestUpstreamWithRetry, requestUpstreamFallback };
 
 // ---------- 转发响应 ----------
 
@@ -299,8 +325,10 @@ if (isMainModule) {
   server.listen(PORT, () => {
     const upstreams = getGhRawUpstreams();
     console.log(`[dev-proxy] listening on http://localhost:${PORT}`);
-    console.log(`[dev-proxy] /hf/*          -> https://hf-mirror.com/*`);
+    const hfUpstreams = getHfUpstreams();
+    console.log(`[dev-proxy] /hf/*          -> ${hfUpstreams.map((h) => `https://${h}/*`).join(" → ")}`);
     console.log(`[dev-proxy] /gh-raw/*      -> ${upstreams.map((h) => `https://${h}/gh/*`).join(" → ")}`);
     if (upstreams.length > 1) console.log(`[dev-proxy] (gh-raw 按上述顺序自动 fallback，可通过 GH_RAW_UPSTREAMS 环境变量覆盖)`);
+    if (hfUpstreams.length > 1) console.log(`[dev-proxy] (hf 按上述顺序自动 fallback，可通过 HF_UPSTREAMS 环境变量覆盖)`);
   });
 }

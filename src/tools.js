@@ -405,13 +405,16 @@ export function toolsDescription() {
 }
 
 /**
- * 执行工具。ctx 提供记忆 store。返回字符串形式的观察结果。
- * 任何异常都会转成可读的错误消息（绝不向模型抛出 JS 异常）。
+ * 执行工具。ctx 提供记忆 store。统一返回对象形式的观察结果 + 性能埋点。
+ * 任何异常都 catch 成 {ok: false, errorMessage} 形态（绝不向模型抛出 JS 异常）。
  *
- * 性能埋点：返回对象 { text, durationMs, ok, errorMessage }，让 agentLoop 能统计
- * 每个工具的耗时与失败率。向后兼容：旧代码仍可拿到字符串（自动 toString()）。
+ * 之前 runTool 可能返回 string（handler 直接 return 字符串）或对象（旧协议），
+ * 现已统一为对象形式。agentLoop 统一解包 toolResult.text 用于拼回消息。
  *
- * @returns {Promise<string|{text:string, durationMs:number, ok:boolean, errorMessage?:string}>}
+ * @param {string} name 工具名
+ * @param {object} input 工具参数对象（与 JSON Schema 校验过的形态）
+ * @param {object} [ctx] 上下文：{memory?: MemoryStore}
+ * @returns {Promise<{text:string, durationMs:number, ok:boolean, errorMessage?:string}>}
  */
 export async function runTool(name, input, ctx = {}) {
   const tool = TOOLS[name];

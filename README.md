@@ -50,7 +50,7 @@ npm run dev
 > **hf-mirror.com** 与 **jsdelivr CDN**，页面保持同源、无需 CORS 配置。
 
 浏览器打开页面后点击「加载模型」：
-- 首次加载需下载约 447MB 权重（Qwen3.5 0.8B q4），之后走浏览器缓存，秒开；
+- 首次加载需下载推荐档权重（默认 Qwen3.5 2B 约 1.2GB；可下拉切换 Qwen3.5 0.8B 约 447MB / 4B 约 2.4GB），之后走浏览器缓存，秒开；
 - 加载完成后控制台输出 `✅ 模型已就绪`，进度条 100%，即可开始对话。
 
 ```
@@ -64,7 +64,7 @@ import { createLocalAgent } from "./src/embed.js";
 
 const agent = createLocalAgent({ onProgress: renderBar, onReady: enableChat, onError: showError });
 await agent.ready();
-await agent.load();                                    // 加载 1B 模型（进度 0-100）
+await agent.load();                                    // 加载默认推荐档（Qwen3.5 2B，约 1.2GB）
 const { answer } = await agent.chat("现在几点", { onStep, onDelta });  // 对话 + 流式
 ```
 
@@ -160,34 +160,34 @@ npm run test:offline
 
 ## 🧩 可选：更换模型
 
-页面左侧下拉可选 5 个模型档位。**默认 `modelId: "auto"`**——`ready()` 会自动探测硬件（WebGPU + 处理器核心数）并推荐最适合的档位，下拉自动切到推荐项并在标题显示原因。仍可在下拉里手动覆盖。
+页面左侧下拉可选 **3 个模型档位**（国内开源，仅阿里 Qwen3.5 系列）。**默认 `modelId: "auto"`**——`ready()` 会自动探测硬件（WebGPU + 处理器核心数）并推荐最适合的档位，下拉自动切到推荐项并在标题显示原因。仍可在下拉里手动覆盖。
 
 | 模型 ID | 档位 | 下载 / 显存 | 适用设备 | 推荐 |
 | --- | --- | --- | --- | --- |
-| `Qwen3.5-0.8B-q4f16_1-MLC` | low | ~447MB / 1.6GB | 低端 / 无 GPU 加速 | — |
-| `gemma3-1b-it-q4f16_1-MLC` | low | ~580MB / 0.8GB | 显存最紧张的兜底档 | — |
-| `Qwen3.5-2B-q4f16_1-MLC` | mid | ~1.2GB / 2.2GB | 4 核、入门档 | — |
-| `Llama-3.2-3B-Instruct-q4f16_1-MLC` | **high** | ~1.8GB / 4GB | 主流 PC（4+ 核） | ⭐ **自动推荐** |
-| `Hermes-3-Llama-3.2-3B-q4f16_1-MLC` | high | ~1.8GB / 2.2GB | 工具调用/JSON 更稳的调优版 | — |
+| `Qwen3.5-0.8B-q4f16_1-MLC` | low | ~447MB / 1.6GB | 低端 / 无 GPU 加速 / 最低显存兜底 | — |
+| `Qwen3.5-2B-q4f16_1-MLC` | **high** | ~1.2GB / 2.2GB | 主流 PC（4+ 核） | ⭐ **自动推荐** |
 | `Qwen3.5-4B-q4f16_1-MLC` | ultra | ~2.4GB / 6GB | 高端 PC（8+ 核） | — |
 
-> 所有档位均经过 SDK 目录校验：`MODEL_OPTIONS` 的每个 id 必须存在于
-> BrowserAI 的 `MODEL_PRESETS` 中（单元测试强制断言），且页面下拉与 `load()`
-> 均按实际目录过滤/降级，杜绝"选中即 UnknownModelError"的失效选项。
+> 所有档位均为**国内开源**（阿里 Qwen3.5），不依赖 huggingface.co 直连；通过 dev-proxy
+> 转发到 `hf-mirror.com` / `hf-api.cn` 国内镜像下载，避免触发代理切换。
+> `MODEL_OPTIONS` 的每个 id 都经过 SDK 目录校验（单元测试强制断言），且页面下拉与
+> `load()` 均按实际目录过滤/降级，杜绝"选中即 UnknownModelError"的失效选项。
 
 **自适应逻辑**（`src/modelLoader.js:recommendModelId(snapshot)`）：
-- 不支持 WebGPU → 最低档
-- 2 核以下 → 最低档
-- 4 核 → high（Llama 3.2 3B 推荐档）
-- 8 核及以上 → 优先 ultra，回退 high
+- 不支持 WebGPU → 最低档（low）
+- 2 核以下       → low
+- 4 核及以上     → 候选 ultra → high → low，优先带 recommended 标记的档（Qwen3.5 2B）
+- 推荐档位于 high 档，8 核机器若想直接上 ultra，可把 `Qwen3.5-4B` 也标 `recommended: true`
 
-**手动覆盖**：在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 增删模型；或在宿主代码里传 `createLocalAgent({ modelId: "Qwen3.5-2B-..." })`。
+**手动覆盖**：在宿主代码里传 `createLocalAgent({ modelId: "Qwen3.5-4B-q4f16_1-MLC" })`。
 
 **新模型接入前请确认**：
 1. MLC 后端有对应编译权重（id 必须有 `q4f16_1-MLC` 等量化后缀）
-2. 在 `MODEL_OPTIONS` 里补全元数据（tier / sizeMB / minVRAMGB / minCores / description）
-3. 首次使用在本地实测可加载；若失败先从 `MODEL_OPTIONS` 移除该选项
-4. 跑 `npm test`——"MODEL_OPTIONS ⊆ SDK 真实目录（MODEL_PRESETS）"的单元测试会立即拦截失效 id
+2. 是国内开源（避免 huggingface.co 直连）
+3. 在 `MODEL_OPTIONS` 里补全元数据（tier / sizeMB / minVRAMGB / minCores / description）
+4. 首次使用在本地实测可加载；若失败先从 `MODEL_OPTIONS` 移除该选项
+5. 跑 `npm test`——"MODEL_OPTIONS ⊆ SDK 真实目录（MODEL_PRESETS）" 与 "全为国内开源"
+   的单元测试会立即拦截失效 id
 
 ## 📊 性能与可观测性
 

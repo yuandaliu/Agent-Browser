@@ -16,9 +16,23 @@ const DB_NAME = "local-llm-agent";
 const DB_VERSION = 1;
 const MESSAGES_STORE = "messages";
 const MEMORIES_STORE = "memories";
-const MAX_HISTORY = 40; // 送入模型的最近消息上限
+const MAX_HISTORY = 40; // getRecent 默认取数（从 IndexedDB 取最近 n 条）
 const MAX_STORAGE_MESSAGES = 200; // 持久化消息上限，超出自动裁剪最旧条目
 const MAX_STORAGE_MEMORIES = 100; // 长期记忆条目上限，超出自动裁剪最旧条目
+
+// 注意：真正"送入模型"的最近消息数是 agentLoop.js 的 MAX_HISTORY_MESSAGES = 8。
+// 之前 MAX_HISTORY 注释说成"送入模型"，是错的——它只控制 getRecent 的默认取数，
+// 实际注入到 messages 数组的条数被 agentLoop 进一步限制。
+
+// 裁剪任务串行化：addMessage 内部 fire-and-forget 触发 trimHistory，
+// 多次快速 addMessage 时如果不串行化，N 个 trimHistory 并发跑 getAll + delete，
+// 可能误删更多条目（虽然 IndexedDB 事务原子性兜底，但应用层语义会 race）。
+// 用模块级 Promise 链把裁剪任务强制排队，确保每次裁剪看到的是"上一次裁剪后"的状态。
+let trimChain = Promise.resolve();
+function enqueueTrim(task) {
+  trimChain = trimChain.then(task, task);
+  return trimChain;
+}
 
 // ---------------------------------------------------------------------------
 // IndexedDB 适配器（浏览器）
@@ -170,17 +184,22 @@ export class MemoryStore {
 
   /** 超过 MAX_STORAGE_MESSAGES 时删除最旧条目，防止持久化无限增长 */
   async trimHistory() {
-    try {
-      const all = await this.getHistory();
-      if (all.length > MAX_STORAGE_MESSAGES) {
-        const toRemove = all.slice(0, all.length - MAX_STORAGE_MESSAGES);
-        for (const m of toRemove) {
-          await this.adapter.delete(MESSAGES_STORE, m.id);
+    // 串行化：本次裁剪任务排在 trimChain 末尾，前面的裁剪完成才执行。
+    // 即使 addMessage 并发触发多个 trimHistory，它们会按 FIFO 串行执行，
+    // 不会同时读 getAll + delete 导致误删。
+    return enqueueTrim(async () => {
+      try {
+        const all = await this.getHistory();
+        if (all.length > MAX_STORAGE_MESSAGES) {
+          const toRemove = all.slice(0, all.length - MAX_STORAGE_MESSAGES);
+          for (const m of toRemove) {
+            await this.adapter.delete(MESSAGES_STORE, m.id);
+          }
         }
+      } catch {
+        /* 裁剪失败不影响写入 */
       }
-    } catch {
-      /* 裁剪失败不影响写入 */
-    }
+    });
   }
 
   async clearHistory() {
@@ -211,14 +230,18 @@ export class MemoryStore {
    * 此前 memories 无上限，条目持续累积会拖慢每轮 recall 与 system prompt 注入。
    */
   async trimMemories() {
-    const all = await this.getMemories();
-    if (all.length > MAX_STORAGE_MEMORIES) {
-      const sorted = [...all].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
-      const toRemove = sorted.slice(0, all.length - MAX_STORAGE_MEMORIES);
-      for (const m of toRemove) {
-        await this.adapter.delete(MEMORIES_STORE, m.key);
+    // 同样串行化（与 trimHistory 共用一条队列），避免 saveMemory 多次并发触发
+    // 多次裁剪时的竞态。
+    return enqueueTrim(async () => {
+      const all = await this.getMemories();
+      if (all.length > MAX_STORAGE_MEMORIES) {
+        const sorted = [...all].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+        const toRemove = sorted.slice(0, all.length - MAX_STORAGE_MEMORIES);
+        for (const m of toRemove) {
+          await this.adapter.delete(MEMORIES_STORE, m.key);
+        }
       }
-    }
+    });
   }
 
   async getMemories() {

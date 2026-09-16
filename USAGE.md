@@ -36,9 +36,9 @@ npm run dev
 ```
 打开页面 → 顶部徽章应显示 "WebGPU ✓"
   ↓
-左侧选模型（默认 Qwen3.5 0.8B）→ 点击「加载模型」
+左侧选模型（页面初次默认 Qwen3.5 0.8B，ready() 后自动切到推荐档 ⭐ Qwen3.5 2B）→ 点击「加载模型」
   ↓
-进度条 0% → 100%（首次下载约 447MB，3-15 分钟；之后走缓存秒开）
+进度条 0% → 100%（默认档 Qwen3.5 2B 约 1.2GB，3-15 分钟；之后走缓存秒开）
   ↓
 绿色提示「模型已就绪」+ 控制台输出 ✅ 模型已就绪
   ↓
@@ -137,6 +137,6 @@ npm run test:search      # 智能搜索页（仿百度 + 悬浮球聊天弹窗�
 | 进度条长时间不动 | hf-mirror 偶发超时。`dev-proxy` 已内置 **3 次重试**（每次间隔 500ms，总耗时 ≤ 1.5s），无需手动操作；若仍失败，查看代理终端是否有 `dev-proxy upstream error` 日志，再点「重试加载」 |
 | 提示 Proxy Worker 未激活 | 确认 `npm run proxy` 已启动、8787 未被占用；首次启动需等几秒（健康检查端点 `/__worker-health`） |
 | 端口被占用（5189/8787） | 关闭残留 node 进程后重启：`Get-Process node | Stop-Process`（Windows） |
-| 模型答非所问 / 不调工具 | 1B 模型能力有限属预期。可换 2B/4B 模型（在 `src/modelLoader.js` 的 `MODEL_OPTIONS` 中扩展）；或在 `src/agentLoop.js` 调高 `MAX_STEPS` 允许多轮试错 |
+| 模型答非所问 / 不调工具 | 1B 模型能力有限属预期。可在下拉里直接切到 Qwen3.5 2B 或 4B（不需要改代码）；或在 `src/agentLoop.js` 调高 `MAX_STEPS` 允许多轮试错 |
 | 公网部署代理被刷流量 | 设置环境变量 `PROXY_TOKEN=xxx` 开启令牌校验，所有请求必须带 `X-Proxy-Token: xxx` 头或 `?token=xxx` 查询参数（详见 `server/dev-proxy.mjs` 顶部注释） |
 | 离线刷新后页面空白 | Service Worker 注册失败（iframe 嵌入 / 非 HTTPS / SW 路径错误）。DevTools → Application → Service Workers 查看注册状态；首次注册后需**刷新一次**才能完全接管请求 |

@@ -7,11 +7,20 @@
  *   3. 若解析出 Action → runTool 执行 → 把 Observation 拼回消息 → 回到 2
  *   4. 若解析出 Final（或无法解析）→ 返回最终答案
  *
- * parseReActOutput 面向 1B 级小模型的输出做了大量容错：
- *   - 标准 "Action: xxx / Action Input: {...}" 块
- *   - JSON 工具调用块（{"action":..., "action_input":...} / {"name":..., "arguments":...}）
- *   - 内联调用（Action: calculate(12+34)）
- *   - 全角冒号、无 "Thought" 前缀、Action 与 Action Input 不相邻等脏输出
+ * parseReActOutput 面向 1B 级小模型的输出做了大量容错，按以下优先级解析：
+ *   0) Qwen3 / Qwen3.5 thinking 模型：先 stripThinking 剥离 "thinking…response" 推理段
+ *   1) Qwen 原生 <tool_call> XML 格式（Qwen3.5 模型最常用）：
+ *      <tool_call>
+ *        <function=calculate>
+ *          <parameter=expression>12+34</parameter>
+ *        </function>
+ *      </tool_call>
+ *   2) JSON 工具调用块（```json 围栏或 {"action":...} / {"name":...} / {"tool":...}）
+ *   3) 标准 "Action: xxx / Action Input: {...}" 块（按行匹配，Action 行不依赖 Thought 上下文）
+ *   4) 内联调用：Action: calculate(12+34) 形式
+ *   5) Final: 文本（取最后一个）
+ *
+ * 全角冒号（：）、逗号（，）会被 normalizeColons 规整成半角后正则匹配。
  */
 
 import { runTool, TOOL_NAMES, toolsDescription } from "./tools.js";
@@ -323,9 +332,10 @@ export function parseReActOutput(text) {
  * @param {object} opts.memory MemoryStore（getRecent / recall 等）
  * @param {(messages:Array, callbacks:{onDelta?:(full:string)=>void}) => Promise<{text:string}>} opts.generate
  *        模型生成函数（由调用方注入，便于测试与 UI 集成）
- * @param {(step:object)=>void} opts.onStep 过程回调：
- *        {type:"stream", text} | {type:"thought", text} | {type:"action", name, input} |
- *        {type:"observation", name, result} | {type:"final", text}
+ * @param {(step:object)=>void} opts.onStep 过程回调（实际 emit 的 step type）：
+ *        {type:"stream", text} | {type:"raw", text} | {type:"action", name, input} |
+ *        {type:"observation", name, result, durationMs?, ok?, errorMessage?} |
+ *        {type:"final", text} | {type:"error", message} | {type:"ttft", durationMs, stepDurationMs, textLength}
  * @param {number} opts.maxSteps 最大循环步数（默认 MAX_STEPS）
  * @param {string} [opts.systemExtras] 附加到系统提示词的额外上下文（如当前页面信息）
  * @returns {Promise<{answer:string, rawTexts:string[], steps:object[]}>}
@@ -446,23 +456,20 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
         let toolResult;
         try {
           toolResult = await runTool(parsed.name, parsed.input, { memory });
-          // runTool 现在返回 {text, durationMs, ok, errorMessage}，解包出 text 用于后续拼接
-          // 仍向后兼容：如果返回的是字符串（旧调用方），保持原行为
-          if (typeof toolResult === "string") {
-            result = toolResult;
-            emit({ type: "observation", name: parsed.name, result });
-          } else {
-            result = toolResult.text;
-            emit({
-              type: "observation",
-              name: parsed.name,
-              result,
-              durationMs: toolResult.durationMs,
-              ok: toolResult.ok,
-              errorMessage: toolResult.errorMessage,
-            });
-          }
+          // runTool 现在统一返回 {text, durationMs, ok, errorMessage} 对象（tools.js）。
+          // 解包 text 用于拼回消息；durationMs/ok/errorMessage 用于性能埋点。
+          result = toolResult.text;
+          emit({
+            type: "observation",
+            name: parsed.name,
+            result,
+            durationMs: toolResult.durationMs,
+            ok: toolResult.ok,
+            errorMessage: toolResult.errorMessage,
+          });
         } catch (err) {
+          // runTool 自身已经把工具 handler 的异常 catch 成 {ok: false} 形态，
+          // 这里能跑到通常是极少见情况（适配器/运行时异常），仍安全降级。
           result = `工具执行出错: ${err?.message ?? err}`;
           emit({ type: "observation", name: parsed.name, result, error: true });
         }
