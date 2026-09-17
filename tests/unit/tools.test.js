@@ -35,7 +35,7 @@ describe("safeEvaluate — 安全计算器", () => {
   });
 
   it("中文算式（全角符号）会被规整后计算", () => {
-    // 模型可能输出全角符号，工具侧 tokenize 入口做规整（不再依赖测试里的 replace）
+    // 模型可能输出全角符号，工具侧 tokenize 入口做规整
     expect(safeEvaluate("１２＋３４")).toBe(46);
     expect(safeEvaluate("１２＊３４")).toBe(408);
     expect(safeEvaluate("（２＋３）＊４")).toBe(20);
@@ -61,7 +61,7 @@ describe("safeEvaluate — 安全计算器", () => {
 });
 
 describe("runTool — 工具执行", () => {
-  // 新版 runTool 返回 { text, durationMs, ok, errorMessage? }，这里用 .text 解包便于断言
+  // runTool 返回 { text, durationMs, ok, errorMessage? }，这里用 .text 解包便于断言
 
   it("get_current_time 返回包含日期时间的结果", async () => {
     const result = await runTool("get_current_time", {});

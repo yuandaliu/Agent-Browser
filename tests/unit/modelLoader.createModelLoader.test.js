@@ -1,11 +1,11 @@
 /**
  * modelLoader.createModelLoader.test.js — createModelLoader 核心方法回归测试
  *
- * 锁住这一轮（v2）修复的关键行为：
+ * 覆盖：
  *   - load() 成功路径 → emit { type: "ready", modelId }
  *   - load() 失败路径 → emit { type: "error", error } + busy 复位
- *   - load(invalidId) → resolveLoadableModelId 降级到 low 档（之前的防线）
- *   - unload() → emit { type: "modelunloaded", modelId }（这一轮新增）
+ *   - load(invalidId) → resolveLoadableModelId 降级到 low 档
+ *   - unload() → emit { type: "modelunloaded", modelId }
  *   - busy 状态机：已有 load 时再 load 抛错
  *   - dispose() 移除所有 SDK 事件订阅
  *   - getLoadedModelId() 反映 unload 后的状态
@@ -115,11 +115,11 @@ describe("createModelLoader — load 成功路径", () => {
 describe("createModelLoader — load 失败路径", () => {
   it("load 抛错 → emit error 事件 + busy 复位（后续 load 可重新触发）", async () => {
     // 用 vi.spyOn 在第一次调时抛错，第二次调时回到原始 mock 行为（成功）。
-    // 之前用 overrides.loadThrows + 直接修改 browserAI.loadThrows 都无效：
+    // 注意不能走 overrides.loadThrows 或直接改 browserAI.loadThrows：
     //   - spread `...overrides` 不会覆盖 makeBrowserAI 里的 async load 实现，
     //     但 `if (overrides.loadThrows)` 闭包能读到 overrides
-    //   - 后续 `browserAI.loadThrows = null` 只改实例属性，闭包里的 overrides 不变
-    //   - 第二次 load 仍抛错，触发 unhandled rejection
+    //   - 直接改 `browserAI.loadThrows` 只动实例属性，闭包里的 overrides 不变，
+    //     第二次 load 仍抛错并触发 unhandled rejection
     const spy = vi.spyOn(browserAI, "load");
     spy.mockImplementationOnce(async () => {
       throw new Error("下载失败");

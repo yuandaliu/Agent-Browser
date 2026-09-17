@@ -1,13 +1,13 @@
 /**
  * pageReader.bootstrap.test.js — initPageWatcher 共享 bootstrap + 引用计数回归测试
  *
- * 锁住这一轮（v2）修复的两个关键行为：
+ * 覆盖两个关键行为：
  *   1. 多 caller 共享一个 DOMContentLoaded 监听器（不重复 addEventListener）
  *   2. dispose 走双路径：observer 已存在时按 observerRefCount 释放；
  *      还在 bootstrap 阶段时按 pendingCallerCount 释放监听器
  *
- * 之前的 bug：sharedBootstrap 触发时清空了 pendingCallerCount 但没把 caller 数
- * 转成 observerRefCount 增量，导致 dispose 永远减不到 0、observer 永远不 disconnect。
+ * 约束：sharedBootstrap 触发时必须把 pendingCallerCount 转成 observerRefCount 增量，
+ * 否则 dispose 永远减不到 0、observer 永远不 disconnect。
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";

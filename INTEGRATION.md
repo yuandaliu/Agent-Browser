@@ -100,6 +100,9 @@ const { answer } = await agent.chat("现在几点", {
 | `isModelLoaded()` / `getLoadedModelId()` | 加载状态查询 |
 | `getRecommendedModelId()` / `getAvailableModels()` | 推荐档位 / 可用档位列表 |
 | `getStats()` / `clearStats()` | 性能快照（字段见 `README.md`「性能与可观测性」）/ 清空 |
+| `getStorageEstimate()` | 源站存储占用 / 配额估算（浏览器会取整）；不可用时返回 `null` |
+| `getCacheStatus(modelId?)` | 指定模型（默认当前档）的下载缓存状态；模型不存在或查询失败返回 `null` |
+| `deleteModelArtifacts(modelId?)` | 删除模型下载缓存（不传参则清空全部模型产物）；目标模型正在使用时会先被释放，只动模型缓存、不影响对话历史 |
 | `getHistory()` / `clearHistory()` | 对话历史读写（跨轮上下文） |
 | `getMemories()` / `saveMemory(k, v)` / `recallMemory(q)` / `clearMemories()` | 长期记忆 |
 | `getFailureLog()` / `clearFailureLog()` | 失败对话调试日志（最近 20 条） |
@@ -115,6 +118,7 @@ const { answer } = await agent.chat("现在几点", {
 | `proxyOrigin` | 本地 127.0.0.1 / 托管页面同源 | 本地强制 IPv4 loopback；远程部署用 `location.origin` |
 | `verifyProxy` | 本地 true / 托管 false | 是否探测代理健康 |
 | `maxSteps` | 5 | ReAct 最大循环步数 |
+| `toolProtocol` | `"auto"` | 工具调用协议：`"auto"`（Qwen 系走原生 `<tool_call>` / `<tool_response>`，其他模型走 ReAct）/ `"react"` / `"native"` / `"json"`（约束解码）。详见 `README.md`「工具调用协议」 |
 | `memoryAdapter` | `null`（IndexedDB） | 自定义记忆适配器 |
 | `onEvent` | — | 统一事件回调（`progress` / `status` / `ready` / `hardware` / `error` / `model-recommended`） |
 | `onProgress` / `onStatus` / `onReady` / `onError` | — | 拆分的加载事件回调 |

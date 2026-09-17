@@ -14,7 +14,7 @@
  *       单元测试（tests/unit/swStrategies.test.js）保证两者行为一致。
  *
  * 版本号：升级缓存策略或修改了 SW 内任意函数时同步递增 VERSION，activate 阶段会自动清理旧缓存。
- * 当前 v2：cacheFirst 在 fetch 拿到 4xx/5xx 时改为透传上游响应（之前会替换成 503，掩盖真实错误）。
+ * cacheFirst 在 fetch 拿到 4xx/5xx 时透传上游响应，不替换为 503——否则会掩盖真实错误。
  */
 
 const VERSION = "v2";

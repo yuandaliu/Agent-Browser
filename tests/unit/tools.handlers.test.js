@@ -119,8 +119,8 @@ describe("web_search handler", () => {
   });
 });
 
-// mock pageReader 模块以拦截 getPageSnapshot（之前直接 pageReader.getPageSnapshot = ...
-// 赋值失败：ESM import 绑定是只读的）
+// mock pageReader 模块以拦截 getPageSnapshot（直接给 pageReader.getPageSnapshot 赋值
+// 在 ESM 下无效：import 绑定是只读的）
 vi.mock("../../src/pageReader.js", async () => {
   const actual = await vi.importActual("../../src/pageReader.js");
   return {

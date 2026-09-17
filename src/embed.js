@@ -19,11 +19,12 @@ import { createModelLoader, getModelOptions, getDefaultModelId, getDefaultModelI
 import { runAgent } from "./agentLoop.js";
 import { initPageWatcher, getPageSnapshot } from "./pageReader.js";
 import { getFailureLog as getFailureLogSingleton } from "./failureLog.js";
+import { buildDecisionSchema } from "./toolSchemas.js"; // 内部使用：toolProtocol "json" 的约束解码 schema
 
 export { getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId, getAvailableModelOptions, BrowserAI, getPageSnapshot, initPageWatcher };
 export { safeEvaluate } from "./tools.js";
 export { getFailureLog, FailureLog, MAX_FAILURES } from "./failureLog.js";
-export { getToolJsonSchema, getToolJsonSchemas, validateToolInput, getOpenAIToolsFormat } from "./toolSchemas.js";
+export { getToolJsonSchema, getToolJsonSchemas, validateToolInput, getOpenAIToolsFormat, buildDecisionSchema } from "./toolSchemas.js";
 
 const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
 
@@ -35,6 +36,13 @@ const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
  * @param {string} [options.proxyOrigin] 代理 origin，默认页面同源
  * @param {boolean} [options.verifyProxy] 是否探测代理健康（本地默认 true，托管默认 false）
  * @param {number} [options.maxSteps=5] ReAct 最大循环步数
+ * @param {"auto"|"react"|"native"|"json"} [options.toolProtocol="auto"] 工具调用协议：
+ *        "auto"   —— Qwen 系模型使用其 chat template 的原生协议（<tool_call> / <tool_response>），
+ *                    其他模型沿用 ReAct 文本协议；
+ *        "react"  —— 强制 Thought: / Action: / Action Input: + Observation 文本协议；
+ *        "native" —— 强制原生 XML 工具协议；
+ *        "json"   —— 约束解码模式：把 buildDecisionSchema() 作为 schema 交给 WebLLM 做 grammar
+ *                    约束解码，模型只可能输出符合 schema 的 JSON（最稳，但流式输出内容是 JSON 文本）
  * @param {object} [options.memoryAdapter] 自定义记忆适配器（默认 IndexedDB）
  * @param {(e:{type:string, progress?:number, status?:string, file?:string, modelId?:string, message?:string, error?:Error})=>void} [options.onEvent]
  *        统一事件回调（progress / status / ready / hardware / error）
@@ -50,6 +58,7 @@ export function createLocalAgent(options = {}) {
     proxyOrigin,
     verifyProxy,
     maxSteps = 5,
+    toolProtocol = "auto",
     memoryAdapter = null,
     onEvent,
     onProgress,
@@ -261,6 +270,15 @@ export function createLocalAgent(options = {}) {
       if (typeof document !== "undefined" && typeof location !== "undefined") {
         systemExtras = `当前所在页面：标题「${document.title}」，网址 ${location.href}。用户可能询问页面内容，需要时可调用 read_page_content 工具读取页面实时内容。`;
       }
+      // 工具协议："auto"（默认）时 Qwen 系模型走 chat template 原生协议，其他模型沿用 ReAct 文本协议；
+      // 显式传 "react" / "native" / "json" 可覆盖（"json" 为约束解码模式）
+      const protocol =
+        toolProtocol === "react" || toolProtocol === "native" || toolProtocol === "json"
+          ? toolProtocol
+          : /^Qwen/i.test(loader.getLoadedModelId() ?? "")
+            ? "native"
+            : "react";
+
       let result;
       try {
         result = await runAgent({
@@ -269,6 +287,7 @@ export function createLocalAgent(options = {}) {
           maxSteps,
           systemExtras,
           signal,
+          toolProtocol: protocol,
           // 不传 runtime：让 SDK 完全使用当前加载模型的 preset.defaultRuntime
           // （含 maxTokens / temperature / topP / repetitionPenalty / disableThinking）。
           // 这样切到不同 tier（Qwen3.5 0.8B/2B/4B）时自动应用各自最优参数，
@@ -277,6 +296,9 @@ export function createLocalAgent(options = {}) {
             ai.generateText(messages, {
               onDelta: generateCallbacks.onDelta ?? onDelta,
               signal: generateCallbacks.signal,
+              // json 协议：把决策 schema 交给 WebLLM 做 grammar 约束解码
+              // （SDK 仅在传入 schema 时才生成 response_format，见 SDK inference.ts）
+              ...(protocol === "json" ? { schema: buildDecisionSchema() } : {}),
             }),
           onStep,
         });
@@ -397,8 +419,7 @@ export function createLocalAgent(options = {}) {
       avgTotalMs: chatStats.length
         ? Math.round((totalDurationMs / chatStats.length) * 100) / 100
         : 0,
-      // 关键改动：原 avgToolMs 实际是"每 chat 的累计工具耗时"（单位 ms/chat），
-      // 命名歧义容易误读。现拆为两个字段：
+      // 拆成两个语义明确的字段，避免单位歧义（per chat vs per call）：
       avgToolMsPerChat: chatStats.length
         ? Math.round((totalToolMs / chatStats.length) * 100) / 100
         : 0,
@@ -411,6 +432,47 @@ export function createLocalAgent(options = {}) {
   }
   function clearStats() {
     chatStats.length = 0;
+  }
+
+  // ---- 存储管理（模型权重缓存占用查询与清理，直通 SDK） ----
+
+  /**
+   * 查询源站存储占用估算（浏览器会做量化/取整，精确字节数不可得）。
+   * @returns {Promise<object|null>} 不可用时返回 null（不抛错）
+   */
+  async function getStorageEstimate() {
+    try {
+      return (await ai.estimateStorage()) ?? null;
+    } catch (err) {
+      console.warn("[embed] estimateStorage 失败:", err?.message ?? err);
+      return null;
+    }
+  }
+
+  /**
+   * 查询指定模型（默认当前已加载档，未加载则为推荐档）的下载缓存状态。
+   * @param {string} [modelIdArg]
+   * @returns {Promise<object|null>} 模型不在 SDK 目录或查询失败时返回 null
+   */
+  async function getCacheStatus(modelIdArg) {
+    const target = modelIdArg ?? loader.getLoadedModelId() ?? actualModelId;
+    if (!target) return null;
+    try {
+      return await ai.cacheStatus(target);
+    } catch (err) {
+      console.warn("[embed] cacheStatus 失败:", err?.message ?? err);
+      return null;
+    }
+  }
+
+  /**
+   * 删除模型权重的下载缓存（只针对模型产物，不动 IndexedDB 历史 / localStorage / cookie）。
+   * 若目标模型正在使用，SDK 会先释放它，随后 modelunloaded 事件会把加载状态同步为"未加载"。
+   * @param {string} [modelIdArg] 不传则删除全部模型产物
+   * @returns {Promise<object>} SDK 清理结果（含 before / after / freedBytes 等）
+   */
+  async function deleteModelArtifacts(modelIdArg) {
+    return modelIdArg ? ai.deleteModelArtifacts(modelIdArg) : ai.deleteAllModelArtifacts();
   }
 
   /** 卸载模型（释放显存/WebGPU 上下文） */
@@ -439,6 +501,9 @@ export function createLocalAgent(options = {}) {
     getSWRegistration: () => swRegistration,
     getStats,
     clearStats,
+    getStorageEstimate,
+    getCacheStatus,
+    deleteModelArtifacts,
     getHistory,
     clearHistory,
     getMemories,

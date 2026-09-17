@@ -407,9 +407,7 @@ export function toolsDescription() {
 /**
  * 执行工具。ctx 提供记忆 store。统一返回对象形式的观察结果 + 性能埋点。
  * 任何异常都 catch 成 {ok: false, errorMessage} 形态（绝不向模型抛出 JS 异常）。
- *
- * 之前 runTool 可能返回 string（handler 直接 return 字符串）或对象（旧协议），
- * 现已统一为对象形式。agentLoop 统一解包 toolResult.text 用于拼回消息。
+ * 调用方（agentLoop）解包 toolResult.text 拼回消息。
  *
  * @param {string} name 工具名
  * @param {object} input 工具参数对象（与 JSON Schema 校验过的形态）

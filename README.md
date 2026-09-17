@@ -1,8 +1,8 @@
 # 本地智能体 · Local Agent
 
 一个**完全在浏览器中运行**的本地小模型智能体：基于 [@missionsquad/browserai](https://github.com/MissionSquad/BrowserAI)
-（WebGPU / WebLLM）加载 1B 级开源模型，实现 **ReAct（思考-行动-观察）循环**、**工具系统**
-（时间 / 计算 / 搜索 / 页面读取 / 记忆）与 **IndexedDB 持久化记忆**，并提供流式输出的聊天界面。
+（WebGPU / WebLLM）加载 1B 级开源模型，实现**工具调用循环**（ReAct 文本 / Qwen 原生 XML / 约束解码三种协议可选）、
+**工具系统**（时间 / 计算 / 搜索 / 页面读取 / 记忆）与 **IndexedDB 持久化记忆**，并提供流式输出的聊天界面。
 
 对话不上传服务器；模型权重下载一次后由浏览器缓存，之后离线可用（权重存放于浏览器 Cache / IndexedDB）。
 
@@ -13,6 +13,7 @@
 | **`README.md`** | 本文件：功能、架构、快速开始、模型、部署、限制 |
 | **`USAGE.md`** | 使用流程：本地体验 / 嵌入 / 部署 / 命令速查 / 常见问题 |
 | **`INTEGRATION.md`** | 嵌入已有页面的三种方式、宿主须知与完整 API |
+| **`ROADMAP.md`** | 迭代计划：分批任务、验收标准、决策记录与风险登记 |
 
 ## 功能总览（对应验收标准）
 
@@ -72,8 +73,8 @@ index.html ──┐
 src/main.js  ── UI 组装：事件绑定、流式渲染、进度条
 ├─ src/embed.js          嵌入式 API 唯一入口（createLocalAgent：ready / load / chat / dispose…）
 ├─ src/modelLoader.js    模型加载引擎（WebGPU 探测、loadprogress 订阅、就绪事件、档位推荐与降级）
-├─ src/agentLoop.js      ReAct 循环：生成 → 解析(Thought/Action/Input) → 执行工具 → Observation → 循环/结束
-│    └─ 高容错解析器：标准块 / JSON 工具调用 / 内联调用 / <tool_call> / 全角符号 / 死循环保护
+├─ src/agentLoop.js      工具调用循环：生成 → 解析 → 执行工具 → 结果回传 → 循环/结束
+│    └─ 三种协议（react / native / json）+ 高容错解析器：标准块 / JSON / 内联 / <tool_call> / 全角符号 / 死循环保护
 ├─ src/tools.js          工具注册表：get_current_time / calculate / web_search / read_page_content / save_memory / recall_memory
 ├─ src/toolSchemas.js    由 TOOLS 派生的 JSON Schema 与 OpenAI tools 格式（单一数据源）
 ├─ src/contextBudget.js  上下文预算：Observation / 历史 / 记忆裁剪，记忆条目校验与防注入标注
@@ -131,7 +132,26 @@ SW 缓存策略、JSON Schema、嵌入式 API；E2E（Playwright + 系统 Chrome
 **清除缓存**：DevTools → Application → Storage → Clear site data；或宿主调用 `caches.delete("local-agent-models-v2")`。
 升级缓存策略时 `public/sw.js` 会递增 `VERSION`，activate 阶段自动清理旧缓存。
 
+**存储管理 API**（宿主可自行接 UI，例如"模型占用 1.2GB · 清理"按钮）：`agent.getStorageEstimate()`
+查询源站占用 / 配额估算，`agent.getCacheStatus(modelId?)` 查询某档缓存状态，
+`agent.deleteModelArtifacts(modelId?)` 删除模型缓存（不传参则清空全部；只动模型产物，不影响 IndexedDB 对话历史）。
+
 **生产环境要求**：HTTPS（localhost 除外）。iframe 嵌入场景 SW 注册可能被宿主页面限制，详见 `INTEGRATION.md`。
+
+## 工具调用协议
+
+`createLocalAgent({ toolProtocol })` 决定智能体如何与模型交换工具调用，共四种取值：
+
+| 取值 | 行为 |
+| --- | --- |
+| `"auto"`（默认） | Qwen 系模型使用其 chat template **原生协议**（system 内的 `<tools>` JSON 定义 + `<tool_call>` XML 回复 + `<tool_response>` 结果回传）；其他模型沿用 ReAct 文本协议 |
+| `"react"` | 强制 `Thought:` / `Action:` / `Action Input:` + `Observation:` 文本协议（改动前的行为，可随时回退） |
+| `"native"` | 强制原生 XML 工具协议（调试 Qwen 协议时使用） |
+| `"json"` | **约束解码**：把 `buildDecisionSchema()` 作为 `schema` 交给 WebLLM 做 grammar 约束，模型只可能输出符合 schema 的 JSON——`action` 被 `enum` 锁死为「已注册工具名 + 空串」，从根本上消除未知工具名与格式跑偏；由 `parseStructuredDecision()` 解析。代价：流式输出内容是 JSON 文本 |
+
+> `"json"` 模式的 schema 定义在 `src/toolSchemas.js`（不使用 `oneOf` / `$ref`，只依赖 WebLLM grammar 支持的 `type` / `enum` / `maxLength` 基础子集）；`input` 用 JSON 字符串承载，避免「任意对象」给约束构造带来的复杂度。
+>
+> 三条解析路径相互独立：`react` / `native` 的行为与改动前一致（既有单测断言的 `Observation:` 前缀只在 `react` 下产生），`json` 仅在显式指定时启用。
 
 ## 模型选择与设备自适应
 
@@ -188,16 +208,19 @@ rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 
 | --- | --- |
 | `getToolJsonSchema(name)` | 单个工具的 JSON Schema（含 `required` 与 `additionalProperties: false`） |
 | `getToolJsonSchemas()` | 全部工具的 Schema 列表 |
-| `getOpenAIToolsFormat()` | OpenAI tools 风格数组，可直接对接原生 function calling |
+| `getOpenAIToolsFormat()` | OpenAI tools 风格数组；`native` 协议用它生成 `<tools>` 段 |
+| `buildDecisionSchema()` | 约束解码用的「一步决策」schema：`action` 用 `enum` 锁死为已注册工具名 + 空串 |
 | `validateToolInput(name, input)` | 结构校验，返回 `{ ok: true }` 或错误信息；业务合法性由 handler 自己保证 |
 
-接入 SDK 原生 tool calling 时（WebLLM / OpenAI 客户端 SDK 直接传 `getOpenAIToolsFormat()`），模型按 JSON 格式
-返回，绕过 ReAct 文本解析，可显著降低“答非所问”率。
+> SDK（及上游 WebLLM）目前**不提供**原生 `tools` / `tool_choice` 参数（其 function calling 仍标注 WIP），
+> 因此工具调用由本项目的三种协议自行编排：`json` 协议通过 SDK 的 `schema` 选项触发 WebLLM 的 grammar 约束解码，
+> 在效果上等同于"原生 function calling"，且不依赖上游进度。
 
 ## 目录结构
 
 ```
 ├── index.html / search.html / vite.config.js / package.json
+├── README.md / USAGE.md / INTEGRATION.md / ROADMAP.md / LICENSE
 ├── src/            # 应用源码（12 个文件，见上方架构）
 ├── server/         # 本地模型代理服务器（dev-proxy.mjs）
 ├── public/         # 离线缓存 Service Worker（sw.js）
@@ -209,12 +232,19 @@ rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 
 
 ## 已知限制
 
-- **硬件**：文本模型需要 WebGPU；无独显时可能回退软件渲染，速度较慢。
+- **硬件**：文本 / 视觉 / 语音-LLM 档位**必须有 WebGPU**，不支持时 SDK 直接抛 `WebGPUUnavailableError`（不会回退软件渲染）；
+  仅语音识别（Whisper / Moonshine / Parakeet）与 TTS 档位可回退 wasm。WebGPU 覆盖约 85.7%，Safari 26 起才支持、Firefox 仍为 flag。
 - **模型能力**：小模型对工具调用的格式遵循存在不确定性，解析器已做多格式容错 + 死循环保护，但仍偶有答非所问；
   换更大的模型（2B/4B）可明显提升稳定性。当前只能胜任时间、计算、搜索这类简单任务。
-- **搜索工具**：依赖 DuckDuckGo / 维基百科的公网可达性，失败时自动降级并返回说明。
+- **搜索工具**：当前用的是 DuckDuckGo **Instant Answer** 接口（返回摘要与相关主题，不是完整网页搜索，结果可能为空），
+  并以维基百科兜底；两者都失败时返回说明。
 - **页面读取**：`read_page_content` 不指定选择器时会读取整个页面，正文提取可能带入无关内容。
 - **存储**：对话历史默认存 IndexedDB，浏览器可用空间小，长期堆积会使浏览器臃肿、影响性能；若改存后端数据库，
   需额外配置数据库连接，且失去离线能力。
 - **嵌入范围**：仅支持单页面应用（SPA）。多页面应用（MPA）中不能依赖“内存”与“页面生命周期”，
   应把智能体当作由 IndexedDB 存数据、Service Worker 存模型的独立本地服务，而不是挂在页面 DOM 上的临时脚本。
+
+## 许可证
+
+本项目代码以 [MIT](LICENSE) 发布。模型权重来自第三方（`mlc-ai` 的 MLC 量化权重、HuggingFace 生态的 ONNX 权重等），
+遵循各自上游许可证；本项目不重新分发权重，只提供下载代理与加载逻辑。

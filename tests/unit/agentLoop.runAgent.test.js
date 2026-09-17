@@ -1,11 +1,11 @@
 /**
  * agentLoop.runAgent.test.js — ReAct 主循环回归测试
  *
- * 锁住这一轮（v2）相关行为：
+ * 覆盖：
  *   - 死循环检测：连续 3 次同 action → 终止 + reason="loop"
  *   - abort signal 中断 → reason="aborted"
  *   - max_steps 终止 → reason="max_steps"
- *   - 工具参数校验失败：注入带 errorMessage 的 observation（不再 ReferenceError）
+ *   - 工具参数校验失败：注入带 errorMessage 的 observation
  *   - 第 2 次相同 action：注入换工具引导 hint
  *   - ttft 事件 emit 正确性
  *   - budgetObservation 在 observation 文本加 prompt injection 防护

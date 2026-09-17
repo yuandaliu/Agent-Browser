@@ -134,8 +134,8 @@ export async function getDefaultModelIdAsync(snapshot) {
 /**
  * 用 SDK 实际模型目录（BrowserAI.presets）过滤 MODEL_OPTIONS。
  *
- * 背景：MODEL_OPTIONS 曾出现 SDK 目录中不存在的 id（Qwen2.5-1.5B / Qwen2.5-3B，
- * 选中即抛 UnknownModelError）。UI 构建下拉时应改用本函数，保证只展示真正可加载的档位。
+ * 背景：MODEL_OPTIONS 与 SDK 目录脱节时会出现"选中即抛 UnknownModelError"的档位。
+ * UI 构建下拉时应改用本函数，保证只展示真正可加载的档位。
  *
  * @param {readonly {id:string}[]} presets - BrowserAI.presets（或任何含 id 字段的对象数组）
  * @returns {object[]} 过滤后的选项（浅拷贝）；presets 为空/无交集时返回全部选项（降级，不阻断）
@@ -193,7 +193,6 @@ export function createModelLoader({ browserAI, onEvent = () => {} }) {
     browserAI.on("modelunloaded", ({ modelId }) => {
       if (loadedModelId === modelId) loadedModelId = null;
       console.log(`[model-loader] 已卸载: ${modelId}`);
-      // 透传给 UI：之前漏掉 onEvent，导致 modelBadge / sendBtn 卸载后状态不更新
       onEvent({ type: "modelunloaded", modelId });
     }),
   ];

@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "在浏览器中运行本地小模型智能体：BrowserAI + ReAct 循环 + 工具系统 + IndexedDB 记忆",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "proxy": "node server/dev-proxy.mjs",

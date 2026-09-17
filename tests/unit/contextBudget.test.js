@@ -1,7 +1,7 @@
 /**
  * contextBudget.test.js — 上下文裁剪单元测试
  *
- * 整个模块之前完全没测过。覆盖：
+ * 覆盖：
  *   - clipText 边界：空、等于 limit、超长
  *   - budgetMemoryContext 的 prompt injection 防护前缀
  *   - budgetObservation 的 prompt injection 防护前缀

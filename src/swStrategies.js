@@ -47,10 +47,9 @@ export function isAppChunkRequest(url) {
  * Cache-first：命中即用，未命中走网络并缓存。
  * 适用：模型权重（不变的大文件）。
  *
- * 关键：fetch 拿到响应（不论 2xx/4xx/5xx）一律透传给调用方，不吞错。
- * 之前在 catch 里统一返回 503 会掩盖 dev-proxy 的 502 真实错误，调试时只看得到
- * "offline and no cache" 而不知道上游到底发生了什么；改成只在 fetch 直接 reject
- * （真断网/网络层失败）时才返回 503。
+ * 关键：fetch 拿到响应（不论 2xx/4xx/5xx）一律透传给调用方，不吞错，
+ * 否则会在 DevTools 里掩盖 dev-proxy 的上游错误（如 502），只剩笼统的 503。
+ * 仅在 fetch 直接 reject（真断网 / 网络层失败）且无缓存时才返回 503。
  *
  * @param {Request} req - 原始请求
  * @param {string} cacheName - Cache Storage 名称

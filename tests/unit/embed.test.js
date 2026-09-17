@@ -1,9 +1,9 @@
 /**
  * embed.test.js — createLocalAgent 关键流程回归测试
  *
- * 锁住这一轮（v2）修复的关键行为：
+ * 覆盖：
  *   - ready() 幂等（多次调用只 init 一次）
- *   - chat() 内部自动 await ready()（这一轮加的兜底）
+ *   - chat() 内部自动 await ready()（兜底）
  *   - chat() 失败时 record failureLog + 累积 stats
  *   - chat() addMessage 失败时 try/catch 不让 failureLog 丢失
  *   - unload() 触发 modelunloaded 事件
@@ -25,8 +25,8 @@ function makeBrowserAIInstance() {
     textModel: vi.fn(() => ({ modelId: "Qwen3.5-2B-q4f16_1-MLC" })),
     load: vi.fn(async (id) => {
       // 模拟真实 SDK：触发 modelloaded 事件 + push 到 loadedModels
-      // （之前漏了这两步，导致 modelLoader.getLoadedModelId() 永远 null，
-      //   且 modelLoader.unload() 读 browserAI.loadedModels.length 抛 TypeError）
+      // （modelLoader.getLoadedModelId() 与 unload() 依赖这两个副作用，
+      //   否则读不到已加载模型）
       const model = { modelId: id, engine: {} };
       loadedModels.push(model);
       for (const fn of listeners.modelloaded ?? []) {
@@ -59,6 +59,11 @@ function makeBrowserAIInstance() {
       for (const fn of listeners[event] ?? []) fn(payload);
     },
     generateText: vi.fn(async () => ({ text: "模型回答" })),
+    // 存储管理（getStorageEstimate / getCacheStatus / deleteModelArtifacts 直通这些方法）
+    estimateStorage: vi.fn(async () => ({ usage: 1024, quota: 4096 })),
+    cacheStatus: vi.fn(async () => ({ cached: true, bytes: 123 })),
+    deleteModelArtifacts: vi.fn(async () => ({ freedBytes: 100 })),
+    deleteAllModelArtifacts: vi.fn(async () => ({ freedBytes: 999 })),
   };
 }
 const BrowserAIMock = vi.fn().mockImplementation(makeBrowserAIInstance);
@@ -133,6 +138,81 @@ beforeEach(() => {
   pageWatcherController.getSnapshot.mockClear();
   pageWatcherController.dispose.mockClear();
   initPageWatcherMock.mockClear();
+});
+
+describe("createLocalAgent — 存储管理 API", () => {
+  /** 取当前 BrowserAI mock 实例（createLocalAgent 内部 new 出来的那个） */
+  const lastAI = () => BrowserAIMock.mock.results.at(-1).value;
+
+  it("getStorageEstimate() 直通 SDK 并返回估算结果", async () => {
+    const agent = createLocalAgent();
+    const ai = lastAI();
+    ai.estimateStorage.mockResolvedValue({ usage: 2048, quota: 8192 });
+    await expect(agent.getStorageEstimate()).resolves.toEqual({ usage: 2048, quota: 8192 });
+    expect(ai.estimateStorage).toHaveBeenCalledTimes(1);
+  });
+
+  it("getStorageEstimate() 在 SDK 返回 undefined 时归一为 null", async () => {
+    const agent = createLocalAgent();
+    lastAI().estimateStorage.mockResolvedValue(undefined);
+    await expect(agent.getStorageEstimate()).resolves.toBeNull();
+  });
+
+  it("getStorageEstimate() 在 SDK 抛错时降级为 null（不向宿主抛出）", async () => {
+    const agent = createLocalAgent();
+    lastAI().estimateStorage.mockRejectedValue(new Error("boom"));
+    await expect(agent.getStorageEstimate()).resolves.toBeNull();
+  });
+
+  it("getCacheStatus(modelId) 用传入的 modelId 查询", async () => {
+    const agent = createLocalAgent();
+    const ai = lastAI();
+    ai.cacheStatus.mockResolvedValue({ cached: true });
+    await expect(agent.getCacheStatus("Qwen3.5-4B-q4f16_1-MLC")).resolves.toEqual({ cached: true });
+    expect(ai.cacheStatus).toHaveBeenCalledWith("Qwen3.5-4B-q4f16_1-MLC");
+  });
+
+  it("getCacheStatus() 在未 ready 且未加载模型时返回 null，且不调用 SDK", async () => {
+    const agent = createLocalAgent();
+    const ai = lastAI();
+    await expect(agent.getCacheStatus()).resolves.toBeNull();
+    expect(ai.cacheStatus).not.toHaveBeenCalled();
+  });
+
+  it("getCacheStatus() 在 ready() 后回落到推荐档 id", async () => {
+    const agent = createLocalAgent();
+    const ai = lastAI();
+    await agent.ready();
+    await agent.getCacheStatus();
+    expect(ai.cacheStatus).toHaveBeenCalledTimes(1);
+    const usedId = ai.cacheStatus.mock.calls[0][0];
+    expect(typeof usedId).toBe("string");
+    expect(usedId.length).toBeGreaterThan(0);
+  });
+
+  it("getCacheStatus() 在 SDK 抛错时降级为 null", async () => {
+    const agent = createLocalAgent();
+    lastAI().cacheStatus.mockRejectedValue(new Error("unknown model"));
+    await expect(agent.getCacheStatus("Qwen3.5-2B-q4f16_1-MLC")).resolves.toBeNull();
+  });
+
+  it("deleteModelArtifacts(modelId) 调用 SDK 的单模型清理", async () => {
+    const agent = createLocalAgent();
+    const ai = lastAI();
+    ai.deleteModelArtifacts.mockResolvedValue({ freedBytes: 5 });
+    await expect(agent.deleteModelArtifacts("Qwen3.5-2B-q4f16_1-MLC")).resolves.toEqual({ freedBytes: 5 });
+    expect(ai.deleteModelArtifacts).toHaveBeenCalledWith("Qwen3.5-2B-q4f16_1-MLC");
+    expect(ai.deleteAllModelArtifacts).not.toHaveBeenCalled();
+  });
+
+  it("deleteModelArtifacts() 不传参时清空全部模型产物", async () => {
+    const agent = createLocalAgent();
+    const ai = lastAI();
+    ai.deleteAllModelArtifacts.mockResolvedValue({ freedBytes: 9 });
+    await expect(agent.deleteModelArtifacts()).resolves.toEqual({ freedBytes: 9 });
+    expect(ai.deleteAllModelArtifacts).toHaveBeenCalledTimes(1);
+    expect(ai.deleteModelArtifacts).not.toHaveBeenCalled();
+  });
 });
 
 describe("createLocalAgent — ready()", () => {

@@ -30,7 +30,7 @@ import { pathToFileURL } from "node:url";
 const PORT = Number(process.argv[2] ?? process.env.PROXY_PORT ?? 8787);
 const WORKER_HEADER = "browserai-proxy/dev";
 // 公网部署安全：设置 PROXY_TOKEN 环境变量后，所有请求需携带 X-Proxy-Token 头或 ?token= 参数。
-// 未设置时（本地开发）放行所有来源，保持原有行为。
+// 未设置时（本地开发）放行所有来源。
 const PROXY_TOKEN = process.env.PROXY_TOKEN ?? "";
 
 // ---------- gh-raw 多上游 fallback ----------
@@ -49,8 +49,8 @@ function getGhRawUpstreams() {
 
 // ---------- hf / hf-transformers 多上游 fallback ----------
 // 顺序尝试：hf-mirror.com → hf-api.cn。
-// 之前的单上游 hf-mirror.com 国内访问偶发超时/限速，会让整次下载失败。
-// 加 hf-api.cn（huggingface 镜像）作为 fallback，单镜像挂掉时自动切下一个。
+// 单上游（hf-mirror.com）在国内访问偶发超时/限速，会让整次下载失败。
+// hf-api.cn（huggingface 镜像）作为 fallback，单镜像挂掉时自动切下一个。
 // 可通过 HF_UPSTREAMS 环境变量（空格分隔）覆盖。
 const DEFAULT_HF_UPSTREAMS = ["hf-mirror.com", "hf-api.cn"];
 function getHfUpstreams() {
@@ -142,7 +142,7 @@ function requestOnce(upstream, method, headers, timeoutMs) {
  * 单上游请求：仅对网络错误（ECONNRESET / ETIMEDOUT / ENOTFOUND / socket hang up 等）
  * 有限重试；HTTP 5xx 不在此层重试，由上层 requestUpstreamFallback 切下一个上游。
  *
- * 超时从原本的 30s 降到 12s：cdn.jsdelivr.net 一旦被 QoS 限速 30s 内根本连不上，
+ * 超时 12s：cdn.jsdelivr.net 一旦被 QoS 限速，30s 内根本连不上，
  * 等满 30s 是浪费；宁可早切下一个上游。
  */
 const PER_UPSTREAM_TIMEOUT_MS = 12_000;
@@ -183,7 +183,7 @@ async function requestUpstreamFallback(upstreams, method, headers) {
     const status = res.statusCode ?? 0;
     if (status >= 200 && status < 500) {
       // 4xx 也是客户端/上游资源问题（如 huggingface repo 不存在、文件 404），
-      // 不切上游；释放 socket 避免连接泄漏（之前漏掉 resume，长时间高并发会泄漏 FD）。
+      // 不切上游；释放 socket 避免连接泄漏（长时间高并发不 release 会耗尽 FD）。
       res.resume();
       return { response: res, upstream, errors };
     }
@@ -301,7 +301,7 @@ const server = http.createServer(async (req, res) => {
     forwardHeaders(upstreamRes, res, { "X-Proxy-Upstream": upstream.host });
 
     // 失败响应强制 no-store：避免 Service Worker 把 502/404 等错误缓存住，
-    // 导致后续重试永远拿到同一个错误响应（曾经踩过的坑）。
+    // 导致后续重试永远拿到同一个错误响应。
     if ((upstreamRes.statusCode ?? 0) >= 400) {
       res.setHeader("Cache-Control", "no-store");
     }

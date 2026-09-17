@@ -127,6 +127,21 @@ describe("stripThinking — Qwen3.5 thinking 段剥离", () => {
     const text = "thinking\n只有推理没有回复";
     expect(stripThinking(text)).toBe(text);
   });
+
+  it("剥离  thinking /  response XML 标签（Qwen3.5 chat template 写法）", () => {
+    const out = stripThinking(" thinking\n用户想知道当前时间。\n response\n\n现在是 15 点 30 分。");
+    expect(out).toBe("现在是 15 点 30 分。");
+  });
+
+  it("空推理段（disableThinking 下模板输出  thinking\\n\\n response）", () => {
+    const out = stripThinking(" thinking\n\n response\n\n现在几点？");
+    expect(out).toBe("现在几点？");
+  });
+
+  it("真实模板形态：<|im_start|>assistant 前缀 +  think 标签组合", () => {
+    const out = stripThinking("<|im_start|>assistant\n thinking\n分析…\n response\n\n回答");
+    expect(out).toBe("回答");
+  });
 });
 
 describe("parseToolCallXml — Qwen 原生 <tool_call> 工具调用", () => {

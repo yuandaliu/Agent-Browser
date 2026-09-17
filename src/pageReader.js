@@ -178,10 +178,8 @@ export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS
       if (!sharedBootstrap) {
         sharedBootstrapOptions = { debounceMs, maxChars };
         sharedBootstrap = () => {
-          // 关键：触发时把 pendingCallerCount 转成 observerRefCount 的增量，
-          // 让总引用计数 = 实际 caller 数。后续 dispose 走 observer 路径才能正确归零。
-          // 修复前是直接递归 initPageWatcher 再清 sharedBootstrap，observerRefCount
-          // 只记 1 而 pending caller 没被计入，dispose 永远减不到 0 → observer 泄漏。
+          // 触发时把 pendingCallerCount 转成 observerRefCount 的增量，让总引用计数 = 实际 caller 数；
+          // 后续 dispose 走 observer 路径才能正确归零（否则 dispose 减不到 0，observer 泄漏）。
           const options = sharedBootstrapOptions;
           const pending = pendingCallerCount;
           pendingCallerCount = 0;

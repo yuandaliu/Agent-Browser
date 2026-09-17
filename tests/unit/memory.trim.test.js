@@ -1,7 +1,7 @@
 /**
  * memory.trim.test.js — trim 串行化回归测试
  *
- * 锁住这一轮（v2）新增的串行化逻辑：
+ * 覆盖串行化逻辑：
  *   - addMessage 内部 fire-and-forget 触发 trimHistory，多个并发 addMessage
  *     必须按顺序串行执行，否则可能误删更多条目
  *   - 同样适用于 saveMemory + trimMemories

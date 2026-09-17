@@ -33,7 +33,7 @@ import {
   SYSTEM_EXTRAS_BUDGET,
   SYSTEM_MEMORY_FALLBACK_BUDGET,
 } from "./contextBudget.js";
-import { validateToolInput } from "./toolSchemas.js";
+import { validateToolInput, getOpenAIToolsFormat } from "./toolSchemas.js";
 
 export const MAX_STEPS = 5;
 export const MAX_HISTORY_MESSAGES = 8; // 送入模型的最近对话条数
@@ -72,13 +72,116 @@ Final: 现在是 15 点 30 分。`;
 }
 
 /**
+ * 原生（Qwen chat template）协议用的工具定义：每行一个 OpenAI 风格 JSON 对象。
+ *
+ * 依据 Qwen3.5 的 chat_template，tools 段由 `{{- tool | tojson }}` 逐行渲染，
+ * 因此这里保持"一行一个 JSON"的形态，贴近模型训练时的分布。
+ */
+export function buildToolsJsonLines() {
+  return getOpenAIToolsFormat()
+    .map((tool) => JSON.stringify(tool))
+    .join("\n");
+}
+
+/**
+ * Qwen3 / Qwen3.5 原生工具协议提示词。
+ *
+ * 为什么不再用自创格式：模型的 chat_template 已定义了它训练过的工具协议——
+ *   system 段给出 "# Tools" + <tools> 内的函数 JSON；
+ *   模型以 <tool_call><function=name><parameter=k>v</parameter></function></tool_call> 回复；
+ *   工具结果以 <tool_response>…</tool_response> 回传（见 runAgent 的 observation 包装）。
+ * 解析侧无需新增路径：parseToolCallXml() 本就是按该格式实现的。
+ *
+ * 注意：本函数产出的文本要放进 system 消息（SDK 未暴露原生 tools 参数，无法让模板自行渲染），
+ * 所以段落顺序刻意与模板一致：tools 段 → 格式说明 → 附加信息（页面/记忆）。
+ */
+export function buildNativeToolPrompt({ toolsJson = "", memoryContext = "", systemExtras = "" } = {}) {
+  const memoryBlock = memoryContext
+    ? `\n你记得以下事实（来自长期记忆）：\n${memoryContext}\n`
+    : "";
+  const extrasBlock = systemExtras ? `\n${systemExtras}\n` : "";
+  return `# Tools
+
+You have access to the following functions:
+
+<tools>
+${toolsJson}
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If no function call is available, answer the question like normal with your current knowledge and do not tell the user about function calls
+- 你是运行在浏览器本地的中文智能助手，最终回答请使用简体中文
+</IMPORTANT>
+${extrasBlock}${memoryBlock}`;
+}
+
+/**
+ * 约束解码（structured output）协议提示词：要求模型只输出一个 JSON 对象。
+ *
+ * 配合 toolSchemas.buildDecisionSchema() 使用——宿主把它作为 `schema` 传给 SDK 后，
+ * WebLLM 会用 grammar 约束解码保证输出符合该 schema，从根本上规避"小模型不遵循文本格式"。
+ *
+ * 字段语义见 buildDecisionSchema 注释：四个字段全部必填，用空字符串表示"不适用"。
+ */
+export function buildJsonDecisionPrompt({ toolsJson = "", memoryContext = "", systemExtras = "" } = {}) {
+  const memoryBlock = memoryContext
+    ? `\n你记得以下事实（来自长期记忆）：\n${memoryContext}\n`
+    : "";
+  const extrasBlock = systemExtras ? `\n${systemExtras}\n` : "";
+  return `你是运行在浏览器本地的中文智能助手，可以调用工具完成任务。
+
+你必须只输出一个 JSON 对象，不要输出任何其他文字、解释或代码块标记。JSON 字段：
+
+- thought: 你的简短思考（字符串，没有可填 ""）
+- action: 要调用的工具名（字符串）；不需要调用工具时必须为空字符串 ""
+- input: 工具参数的 JSON 字符串，例如 "{\\"expression\\": \\"12+34\\"}"；无参数或不调用工具时填 "{}"
+- final: 面向用户的最终中文回答（字符串）；调用工具时必须为空字符串 ""
+
+规则：
+- 需要外部信息（时间 / 计算 / 搜索 / 页面内容 / 记忆）时先调用工具：action 填工具名，input 填参数，final 留 ""
+- 不需要工具、或工具结果已足够回答时：action 留 ""，把完整回答写进 final
+- input 必须是 JSON 字符串，不要写嵌套对象
+
+可用工具（每行一个 JSON）：
+${toolsJson}
+${extrasBlock}${memoryBlock}`;
+}
+
+/**
  * 控制 system prompt 整体长度（字符预算）。
  * 优先满足 4K token 上下文的小模型：工具描述/格式指令不可裁，
  * 超限时按 页面 extras → 长期记忆 的顺序降级裁剪，避免静默撑爆 context。
+ *
+ * @param {string} toolsDescription 工具定义。react 协议传文本说明；
+ *        native / json 协议应传 buildToolsJsonLines() 的结果（每行一个 JSON）
+ * @param {string} [memoryContext]
+ * @param {string} [systemExtras]
+ * @param {"react"|"native"|"json"} [protocol="react"] 工具协议（默认 react，保持既有行为）
  */
-export function fitSystemPrompt(toolsDescription, memoryContext = "", systemExtras = "") {
-  const build = (mem, extras) =>
-    buildSystemPrompt({ toolsDescription, memoryContext: mem, systemExtras: extras });
+export function fitSystemPrompt(toolsDescription, memoryContext = "", systemExtras = "", protocol = "react") {
+  const build = (mem, extras) => {
+    if (protocol === "native") {
+      return buildNativeToolPrompt({ toolsJson: toolsDescription, memoryContext: mem, systemExtras: extras });
+    }
+    if (protocol === "json") {
+      return buildJsonDecisionPrompt({ toolsJson: toolsDescription, memoryContext: mem, systemExtras: extras });
+    }
+    return buildSystemPrompt({ toolsDescription, memoryContext: mem, systemExtras: extras });
+  };
   let sys = build(memoryContext, systemExtras);
   if (sys.length <= SYSTEM_PROMPT_BUDGET) return sys;
 
@@ -105,7 +208,12 @@ export function stripThinking(text) {
   const normalized = String(text)
     .replace(/^\s*<\|im_start\|>assistant\s*/i, "")
     .replace(/<\|thinking\|>/gi, "thinking\n")
-    .replace(/<\|\/thinking\|>/gi, "response\n");
+    .replace(/<\|\/thinking\|>/gi, "response\n")
+    // Qwen3.5 / Qwen3 的 chat template 用标准 XML 标签包裹推理段（<think>…</think>，见
+    // enable_thinking 分支），与早期 <|thinking|> 特殊 token 是两套写法，这里一并归一为
+    // thinking/response 标记，复用下方同一正则。
+    .replace(/<\s*think\s*>/gi, "thinking\n")
+    .replace(/<\s*\/\s*think\s*>/gi, "response\n");
   const m = normalized.match(/^\s*thinking\s*\n[\s\S]*?\n\s*response\s*\n?([\s\S]*)$/i);
   if (m) {
     const rest = m[1].trimStart();
@@ -321,6 +429,61 @@ export function parseReActOutput(text) {
   return { type: "unknown", text: core.trim() };
 }
 
+/**
+ * 解析"约束解码"协议（toolProtocol: "json"）的输出：一个决策 JSON 对象。
+ *
+ * 与 parseReActOutput 的关系：本函数是"优先级更高的独立路径"，只在 json 协议下被调用
+ * （见 runAgent），因此不会影响 react / native 协议的既有解析行为。
+ *
+ * 期望形态（由 toolSchemas.buildDecisionSchema 约束）：
+ *   { thought: string, action: string, input: string, final: string }
+ *   - action 非空且为已注册工具名 → 工具调用；input 为 JSON 字符串（解析失败时按裸值包装）
+ *   - action 为空且 final 非空     → 最终回答
+ * 兼容：input 也可能是对象（模型不回退到字符串时），此时直接采用。
+ *
+ * @returns {{type:"action", name:string, input:any} | {type:"final", text:string} | null}
+ *          非决策 JSON 时返回 null（调用方回退到 parseReActOutput）
+ */
+export function parseStructuredDecision(text) {
+  if (!text || typeof text !== "string") return null;
+  const core = stripThinking(text).trim();
+  // 容忍模型用 ```json 围栏包裹（约束解码下通常不会出现，纯文本模式下可能）
+  const fenced = core.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fenced ? fenced[1] : core).trim();
+  if (!candidate.startsWith("{")) return null;
+
+  let obj;
+  try {
+    obj = JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+
+  const actionName = typeof obj.action === "string" ? obj.action.trim() : "";
+  let input = obj.input ?? obj.action_input ?? null;
+  if (typeof input === "string") {
+    const raw = input.trim();
+    if (!raw || raw === "{}") {
+      input = {};
+    } else {
+      try {
+        input = JSON.parse(raw);
+      } catch {
+        input = { input: raw }; // 裸值：与 extractActionInput 的兜底策略一致
+      }
+    }
+  }
+
+  if (actionName && TOOL_NAMES.includes(actionName)) {
+    return { type: "action", name: actionName, input: input ?? {} };
+  }
+
+  const finalText = typeof obj.final === "string" ? obj.final.trim() : "";
+  if (finalText) return { type: "final", text: finalText };
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // ReAct 循环
 // ---------------------------------------------------------------------------
@@ -338,9 +501,14 @@ export function parseReActOutput(text) {
  *        {type:"final", text} | {type:"error", message} | {type:"ttft", durationMs, stepDurationMs, textLength}
  * @param {number} opts.maxSteps 最大循环步数（默认 MAX_STEPS）
  * @param {string} [opts.systemExtras] 附加到系统提示词的额外上下文（如当前页面信息）
+ * @param {"react"|"native"|"json"} [opts.toolProtocol="react"] 工具调用协议（默认 react）：
+ *        react 用自创文本格式；native 用 Qwen chat template 原生 XML 协议；
+ *        json 期望模型输出单个决策 JSON（通常配合约束解码，见 parseStructuredDecision）
  * @returns {Promise<{answer:string, rawTexts:string[], steps:object[]}>}
  */
-export async function runAgent({ userInput, memory, generate, onStep = () => {}, maxSteps = MAX_STEPS, systemExtras = "", signal }) {
+export async function runAgent({ userInput, memory, generate, onStep = () => {}, maxSteps = MAX_STEPS, systemExtras = "", signal, toolProtocol = "react" }) {
+  // 协议归一化：非白名单取值一律回退 react，避免宿主传错值时提示词与解析不匹配
+  const protocol = toolProtocol === "native" || toolProtocol === "json" ? toolProtocol : "react";
   const steps = [];
   const rawTexts = [];
   const emit = (step) => {
@@ -359,8 +527,10 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     /* 记忆不可用时不阻断对话 */
   }
 
-  // system prompt 整体受预算约束（extras → 记忆 降级），防止小模型 context 被撑爆
-  const system = fitSystemPrompt(toolsDescription(), memoryContext, systemExtras);
+  // system prompt 整体受预算约束（extras → 记忆 降级），防止小模型 context 被撑爆。
+  // react 协议用文本工具说明；native / json 协议改用"每行一个 JSON"的函数定义，贴近 Qwen chat template
+  const toolsPayload = protocol === "react" ? toolsDescription() : buildToolsJsonLines();
+  const system = fitSystemPrompt(toolsPayload, memoryContext, systemExtras, protocol);
 
   // 组装消息：system + 最近历史（每条裁剪）+ 当前用户输入
   let history = [];
@@ -397,8 +567,8 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
       });
       text = result.text ?? "";
     } catch (err) {
-      // 关键改动：识别 AbortError（SDK 在 abort 时可能抛）或 signal 已 abort，
-      // 标记 reason 为 "aborted" 而非 "error"（避免把用户主动中止当成生成失败）
+      // 识别 AbortError（SDK 在 abort 时可能抛）或 signal 已 abort，标记 reason 为 "aborted"
+      // 而非 "error"——避免把用户主动中止当成生成失败
       if (err?.name === "AbortError" || signal?.aborted) {
         emit({ type: "error", message: "用户已中止对话" });
         return { answer: "（已中止）", rawTexts, steps, ok: false, reason: "aborted" };
@@ -413,7 +583,9 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     }
     rawTexts.push(text);
 
-    const parsed = parseReActOutput(text);
+    // json 协议先按"决策 JSON"解析（约束解码的产物）；不匹配则回退到既有解析路径。
+    // react / native 协议不进入该分支，行为与改动前完全一致。
+    const parsed = (protocol === "json" ? parseStructuredDecision(text) : null) ?? parseReActOutput(text);
     emit({ type: "raw", text });
 
     if (parsed.type === "action") {
@@ -435,11 +607,8 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
       }
 
       // 集中校验工具参数（结构层）：必填字段、类型、additionalProperties。
-      // 之前校验分散在 handler 里，容易遗漏；这里做"边界拦截"，
-      // 把"字段缺失 / 类型错误"在调用 runTool 前就转成可读 observation 反馈给模型。
-      // 本次工具调用的观察文本：参数校验失败 / 工具 handler 成功或抛错，
-      // 三条路径都会赋值，末尾拼回消息驱动下一步。
-      // 注意：此前漏了声明，赋值命中 ESM 严格模式 → ReferenceError，工具一报错整个对话就崩。
+      // 在调用 runTool 前把"字段缺失 / 类型错误"转成可读 observation 反馈给模型，
+      // 避免校验逻辑分散在各个 handler 里被遗漏。
       let result;
       const validation = validateToolInput(parsed.name, parsed.input);
       if (!validation.ok) {
@@ -483,7 +652,20 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
 
       // 把模型输出与观察结果拼回消息，驱动下一步（Observation 裁剪后注入，不影响 UI 展示）
       messages.push({ role: "assistant", content: text });
-      messages.push({ role: "user", content: `Observation: ${budgetObservation(result)}${hint}` });
+      // 观察结果的包装随协议变化：
+      //   react  → "Observation: …"（自创格式，既有单测断言该前缀）
+      //   native / json → <tool_response>…</tool_response>：Qwen chat template 用它区分
+      //     "工具结果回传"与"新的用户提问"——user 消息若以 <tool_response> 开头且以
+      //     </tool_response> 结尾，模板不会把它当作新查询（否则会 raise_exception）。
+      // 注意 hint 必须放在 </tool_response> 之内，否则会破坏模板的 endswith 判定。
+      const observationBody = `${budgetObservation(result)}${hint}`;
+      messages.push({
+        role: "user",
+        content:
+          protocol === "react"
+            ? `Observation: ${observationBody}`
+            : `<tool_response>\n${observationBody}\n</tool_response>`,
+      });
       continue;
     }
 

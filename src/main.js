@@ -1,8 +1,8 @@
 /**
  * main.js — 应用入口：基于 embed.js 的组件 API 组装 UI
  *
- * 重构说明：核心流程（模型加载 / ReAct 循环 / 历史保存 / 页面监听）统一收敛到
- * createLocalAgent，本文件只负责 DOM 渲染与事件绑定，消除此前与 embed.js 的双套状态机。
+ * 核心流程（模型加载 / 工具循环 / 历史保存 / 页面监听）统一收敛到 createLocalAgent，
+ * 本文件只负责 DOM 渲染与事件绑定。
  */
 import { createLocalAgent, getModelOptions, getDefaultModelId } from "./embed.js";
 
@@ -103,8 +103,7 @@ function handleModelEvent(event) {
       el.readyBox.classList.remove("hidden");
       el.modelBadge.textContent = `已加载：${friendlyModelName(event.modelId)}`;
       el.modelBadge.className = "badge badge-ok";
-      // 关键改动：不禁用 loadBtn，让用户能从下拉切换模型后点"重新加载"
-      // （之前 disabled=true 会让用户无法换模型重新加载，是核心功能退化）
+      // 不禁用 loadBtn：允许用户从下拉切换模型后点"重新加载"
       el.loadBtn.textContent = "重新加载";
       el.loadBtn.disabled = false;
       el.inputBox.disabled = false;
@@ -115,8 +114,7 @@ function handleModelEvent(event) {
     case "error": {
       el.errorBox.textContent = event.error?.message ?? String(event.error);
       el.errorBox.classList.remove("hidden");
-      // 关键改动：模型加载失败时也要隐藏进度条（之前遗漏，导致进度条残留显示）
-      el.progressWrap.classList.add("hidden");
+      el.progressWrap.classList.add("hidden"); // 加载失败时一并隐藏进度条
       el.loadBtn.textContent = "重试加载";
       el.loadBtn.disabled = false;
       break;
@@ -124,7 +122,6 @@ function handleModelEvent(event) {
     case "modelunloaded": {
       // 模型被 unload() 卸载：清空 UI 状态，避免 modelBadge 仍显示旧模型、
       // sendBtn 还 enabled 但实际模型已不可用（chat 会抛"模型尚未加载"）。
-      // 修复前 modelLoader 漏了 onEvent 透传，这里是补的对应 UI 处理。
       el.modelBadge.textContent = "未加载模型";
       el.modelBadge.className = "badge badge-muted";
       el.readyBox.classList.add("hidden");

@@ -20,9 +20,8 @@ const MAX_HISTORY = 40; // getRecent 默认取数（从 IndexedDB 取最近 n �
 const MAX_STORAGE_MESSAGES = 200; // 持久化消息上限，超出自动裁剪最旧条目
 const MAX_STORAGE_MEMORIES = 100; // 长期记忆条目上限，超出自动裁剪最旧条目
 
-// 注意：真正"送入模型"的最近消息数是 agentLoop.js 的 MAX_HISTORY_MESSAGES = 8。
-// 之前 MAX_HISTORY 注释说成"送入模型"，是错的——它只控制 getRecent 的默认取数，
-// 实际注入到 messages 数组的条数被 agentLoop 进一步限制。
+// 注意：真正"送入模型"的最近消息数是 agentLoop.js 的 MAX_HISTORY_MESSAGES = 8；
+// 本常量只控制 getRecent 的默认取数。
 
 // 裁剪任务串行化：addMessage 内部 fire-and-forget 触发 trimHistory，
 // 多次快速 addMessage 时如果不串行化，N 个 trimHistory 并发跑 getAll + delete，
@@ -227,7 +226,7 @@ export class MemoryStore {
 
   /**
    * 超过 MAX_STORAGE_MEMORIES 时删除最旧条目。
-   * 此前 memories 无上限，条目持续累积会拖慢每轮 recall 与 system prompt 注入。
+   * 无上限时，条目持续累积会拖慢每轮 recall 与 system prompt 注入。
    */
   async trimMemories() {
     // 同样串行化（与 trimHistory 共用一条队列），避免 saveMemory 多次并发触发

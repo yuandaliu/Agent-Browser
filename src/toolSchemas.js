@@ -135,3 +135,32 @@ export function getOpenAIToolsFormat() {
     },
   }));
 }
+
+/**
+ * 生成"一步决策"的 JSON Schema，用于 SDK 的 schema 约束解码
+ * （`ai.generateText(messages, { schema })` → WebLLM grammar 约束，见 SDK 的 generation.ts）。
+ *
+ * 设计取舍：
+ *   - 不用 oneOf / anyOf / $ref：WebLLM 的 grammar 构造对高级构造支持有限，SDK 自带的
+ *     DEFAULT_EXTRACTION_SCHEMA 也只使用 type / enum / maxLength / items 这一基础子集。
+ *     因此用"四个字段全部必填 + 空字符串表示不适用"来表达"调用工具 or 直接回答"的二选一。
+ *   - action 用 enum 锁死为「已注册工具名 + 空字符串」：约束解码下模型**不可能**输出未知
+ *     工具名，"未知工具"这一类失败被从根上消除（工具增删后 enum 自动派生，无需改本文件）。
+ *   - input 用字符串承载 JSON（如 "{\"expression\":\"12+34\"}"）而非嵌套对象：避免"任意
+ *     对象"给 grammar 构造带来的复杂度，解析侧再 JSON.parse（见 agentLoop.parseStructuredDecision）。
+ *
+ * @returns {object} JSON Schema
+ */
+export function buildDecisionSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      thought: { type: "string", maxLength: 240 },
+      action: { type: "string", enum: [...TOOL_NAMES, ""], maxLength: 64 },
+      input: { type: "string", maxLength: 400 },
+      final: { type: "string", maxLength: 2000 },
+    },
+    required: ["thought", "action", "input", "final"],
+  };
+}

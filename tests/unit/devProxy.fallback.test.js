@@ -1,16 +1,16 @@
 /**
  * devProxy.fallback.test.js — requestUpstreamFallback 多上游调度回归测试
  *
- * 锁住这一轮（v2）相关行为：
+ * 覆盖：
  *   - 2xx 响应直接返回（不切上游）
- *   - 4xx 响应透传（不切上游）+ 释放 socket（之前修的 socket 泄漏）
+ *   - 4xx 响应透传（不切上游）+ 释放 socket（避免连接泄漏）
  *   - 5xx 响应切下一个上游
  *   - 网络错误切下一个上游
  *   - 全失败抛带 upstreamErrors 数组的 Error
  *
  * 实现方式：mock 整个 `node:https` 模块，让 `https.request` 返回可控的 mock response。
- * 之前用 vi.mock 替换 dev-proxy 内部的 requestUpstreamWithRetry 在 ESM 严格模式
- * 下不生效（闭包引用 vs export 绑定的语义差异），改成 mock 底层 https.request。
+ * 注意：直接 vi.mock 替换 dev-proxy 内部的 requestUpstreamWithRetry 在 ESM 严格模式
+ * 下不生效（闭包引用 vs export 绑定的语义差异），因此这里 mock 底层 https.request。
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";

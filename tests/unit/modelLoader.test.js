@@ -2,7 +2,7 @@
  * modelLoader.test.js — 模型元数据与设备自适应推荐单元测试
  *
  * 覆盖：
- *   - MODEL_OPTIONS 结构（新加的 tier / sizeMB / minVRAMGB / minCores / recommended 字段）
+ *   - MODEL_OPTIONS 结构（tier / sizeMB / minVRAMGB / minCores / recommended 字段）
  *   - getModelOptions 返回浅拷贝（防 mutation）
  *   - getDefaultModelId 返回同步 fallback
  *   - recommendModelId 在不同 snapshot 下的档位选择

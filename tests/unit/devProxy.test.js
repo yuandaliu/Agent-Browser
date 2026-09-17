@@ -16,7 +16,7 @@ describe("buildUpstreamCandidates — 路由映射", () => {
     const reqUrl = new URL("http://localhost/hf/Qwen/Qwen3-5/config.json");
     const candidates = buildUpstreamCandidates(reqUrl);
     expect(candidates.length).toBeGreaterThanOrEqual(2);
-    // 第一候选仍是 hf-mirror.com（保持向后兼容）
+    // 第一候选必须是 hf-mirror.com（保持向后兼容）
     expect(candidates[0].href).toBe("https://hf-mirror.com/Qwen/Qwen3-5/config.json");
     // 至少存在一个非 hf-mirror.com 的 fallback 候选
     expect(candidates.some((u) => u.host !== "hf-mirror.com")).toBe(true);
