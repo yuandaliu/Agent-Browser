@@ -1,24 +1,18 @@
 /**
- * main.js — 应用入口：基于 embed.js 的组件 API 组装 UI
+ * main.js — 应用入口：模型面板 + 统一聊天组件
  *
- * 核心流程（模型加载 / 工具循环 / 历史保存 / 页面监听）统一收敛到 createLocalAgent，
- * 本文件只负责 DOM 渲染与事件绑定。
+ * 聊天 UI 由 src/chatWidget.js 统一渲染（与 search / demo 页共用同一实现，
+ * 消除此前三份实现的行为漂移），本文件只负责模型面板与事件组装。
  */
 import { createLocalAgent, getModelOptions, getDefaultModelId } from "./embed.js";
-
-// ---------------------------------------------------------------------------
-// 初始化：创建智能体实例并 ready（内部完成 IndexedDB 降级 + WebGPU 预检 + 页面监听）
-// ---------------------------------------------------------------------------
-
-const agent = createLocalAgent({ onEvent: handleModelEvent });
-try {
-  await agent.ready();
-} catch (err) {
-  console.error("[app] 智能体初始化失败:", err);
-}
+import { createChatWidget } from "./chatWidget.js";
 
 // ---------------------------------------------------------------------------
 // DOM 引用
+//
+// 必须在创建 agent 之前完成：createLocalAgent 的 ready() 会在解析过程中同步触发
+// hardware 事件，若此时 el 尚未初始化，回调里的访问会抛 TDZ 错误，且该错误会被 SDK
+// 内部的 try/catch 静默吞掉——表现为「硬件徽章不更新」这类难查的现象。
 // ---------------------------------------------------------------------------
 
 const el = {
@@ -32,26 +26,39 @@ const el = {
   errorBox: document.getElementById("error-box"),
   hardwareBadge: document.getElementById("hardware-badge"),
   modelBadge: document.getElementById("model-badge"),
-  chatLog: document.getElementById("chat-log"),
-  inputBox: document.getElementById("input-box"),
-  sendBtn: document.getElementById("send-btn"),
-  newChatBtn: document.getElementById("new-chat-btn"),
+  chatWidget: document.getElementById("chat-widget"),
 };
 
 // ---------------------------------------------------------------------------
-// 模型下拉（带"推荐"标注）
-// 用 agent.getAvailableModels()：只列出 SDK 目录中真实存在的档位，
-// 防止 MODEL_OPTIONS 与 SDK 目录脱节时出现"选中即加载失败"的选项。
+// 智能体 + 聊天组件
 // ---------------------------------------------------------------------------
 
-for (const option of agent.getAvailableModels()) {
+const agent = createLocalAgent({ onEvent: handleModelEvent });
+
+const widget = createChatWidget({
+  container: el.chatWidget,
+  agent,
+  showAvatar: true,
+  welcomeHtml:
+    '<div class="la-welcome-icon">🤖</div>' +
+    "<h2>你好，我是本地智能体</h2>" +
+    "<p>我的模型完全运行在你的浏览器里（WebGPU），不上传对话。<br />先点击左侧「加载模型」，然后就可以开始对话了。</p>",
+  onStatus: (msg) => {
+    el.errorBox.textContent = msg;
+    el.errorBox.classList.remove("hidden");
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 模型下拉
+// ---------------------------------------------------------------------------
+
+for (const option of getModelOptions()) {
   const opt = document.createElement("option");
   opt.value = option.id;
-  opt.textContent = option.recommended ? `${option.label} ⭐` : option.label;
-  opt.dataset.tier = option.tier;
+  opt.textContent = option.label;
   el.modelSelect.appendChild(opt);
 }
-// 默认选最低档（ready 后会改成推荐档）
 el.modelSelect.value = getDefaultModelId();
 
 // ---------------------------------------------------------------------------
@@ -72,24 +79,13 @@ function handleModelEvent(event) {
       }
       break;
     }
-    case "model-recommended": {
-      // ready() 后 SDK 推荐了适合当前硬件的模型 → 自动切下拉
-      el.modelSelect.value = event.modelId;
-      const opt = getModelOptions().find((m) => m.id === event.modelId);
-      if (opt) {
-        el.modelSelect.title = `为你的设备推荐：${opt.label}（${opt.description}）`;
-      }
-      break;
-    }
     case "progress": {
       const pct = Math.round(event.progress * 100);
       maxProgress = Math.max(maxProgress, pct);
       el.progressBar.style.width = `${maxProgress}%`;
       el.progressPct.textContent = `${maxProgress}%`;
-      // file（具体分片名）优先级高于 status（通用状态描述），
-      // 因为 file 更贴近用户当前正在下载什么，对调试与透明度更有帮助。
+      if (event.status) el.progressStatus.textContent = event.status;
       if (event.file) el.progressStatus.textContent = event.file;
-      else if (event.status) el.progressStatus.textContent = event.status;
       break;
     }
     case "status": {
@@ -103,52 +99,37 @@ function handleModelEvent(event) {
       el.readyBox.classList.remove("hidden");
       el.modelBadge.textContent = `已加载：${friendlyModelName(event.modelId)}`;
       el.modelBadge.className = "badge badge-ok";
-      // 不禁用 loadBtn：允许用户从下拉切换模型后点"重新加载"
-      el.loadBtn.textContent = "重新加载";
-      el.loadBtn.disabled = false;
-      el.inputBox.disabled = false;
-      el.sendBtn.disabled = false;
+      el.loadBtn.textContent = "已就绪 ✓";
+      el.loadBtn.disabled = true;
+      widget.setEnabled(true); // 模型就绪 → 启用聊天输入
       console.log("✅ 模型已就绪:", event.modelId); // 验收：控制台输出"模型已就绪"
       break;
     }
     case "error": {
       el.errorBox.textContent = event.error?.message ?? String(event.error);
       el.errorBox.classList.remove("hidden");
-      el.progressWrap.classList.add("hidden"); // 加载失败时一并隐藏进度条
       el.loadBtn.textContent = "重试加载";
       el.loadBtn.disabled = false;
-      break;
-    }
-    case "modelunloaded": {
-      // 模型被 unload() 卸载：清空 UI 状态，避免 modelBadge 仍显示旧模型、
-      // sendBtn 还 enabled 但实际模型已不可用（chat 会抛"模型尚未加载"）。
-      el.modelBadge.textContent = "未加载模型";
-      el.modelBadge.className = "badge badge-muted";
-      el.readyBox.classList.add("hidden");
-      el.inputBox.disabled = true;
-      el.sendBtn.disabled = true;
-      el.loadBtn.textContent = "加载模型";
-      el.loadBtn.disabled = false;
-      console.log("[app] 模型已卸载:", event.modelId);
       break;
     }
   }
 }
 
-function shortModelName(id) {
+/**
+ * 从模型 id 取最后一段（"owner/repo" → "repo"）。纯函数，导出以便单测。
+ */
+export function shortModelName(id) {
   return id.split("/").pop() ?? id;
 }
 
 /**
- * 取模型可读名：优先 MODEL_OPTIONS.label 的主名部分（取括号前，
- * 主动去掉"~447MB / 1.6GB 显存"等元数据，因为 modelBadge 空间有限，
- * 完整信息已经在 select 标签里展示了）。
- * 找不到时降级到 split("/").pop()，再不行原样返回。
+ * 友好的模型名：优先取 MODEL_OPTIONS 中 label 的主名（"（" 之前），
+ * 未知 id 降级到 shortModelName。纯函数，导出以便单测。
  */
-function friendlyModelName(id) {
+export function friendlyModelName(id) {
   const opt = getModelOptions().find((m) => m.id === id);
-  if (opt) return opt.label.split("（")[0]; // 取括号前的主名（"Qwen3.5 0.8B"），去掉括号里的元数据
-  return shortModelName(id);
+  if (!opt) return shortModelName(id);
+  return opt.label.split("（")[0].trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -160,11 +141,6 @@ el.loadBtn.addEventListener("click", async () => {
   el.readyBox.classList.add("hidden");
   maxProgress = 0;
   el.progressWrap.classList.remove("hidden");
-  // 显式重置进度条 UI（避免上次加载完成的 100% / "加载完成" 残留显示一帧，
-  // 直到下一个 progress 事件覆盖）
-  el.progressBar.style.width = "0%";
-  el.progressPct.textContent = "0%";
-  el.progressStatus.textContent = "加载中…";
   el.loadBtn.disabled = true;
   el.loadBtn.textContent = "加载中…";
   const modelId = el.modelSelect.value;
@@ -177,275 +153,11 @@ el.loadBtn.addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 聊天渲染
+// 初始化
 // ---------------------------------------------------------------------------
 
-function appendMessage(role, content) {
-  const wrapper = document.createElement("div");
-  wrapper.className = `msg msg-${role}`;
-
-  const avatar = document.createElement("div");
-  avatar.className = "msg-avatar";
-  avatar.textContent = role === "user" ? "🧑" : "🤖";
-
-  const body = document.createElement("div");
-  body.className = "msg-body";
-
-  const bubble = document.createElement("div");
-  bubble.className = "msg-bubble";
-  bubble.textContent = content;
-
-  body.appendChild(bubble);
-  wrapper.appendChild(avatar);
-  wrapper.appendChild(body);
-  el.chatLog.appendChild(wrapper);
-  scrollToBottom();
-  return bubble;
+try {
+  await agent.ready();
+} catch (err) {
+  console.error("[app] 智能体初始化失败:", err);
 }
-
-/** 创建（或复用）助手消息的思考过程折叠区 */
-let currentStepsBlock = null;
-
-function startStepsBlock() {
-  if (currentStepsBlock) return currentStepsBlock;
-
-  const container = document.createElement("div");
-  container.className = "msg msg-ai";
-  const avatar = document.createElement("div");
-  avatar.className = "msg-avatar";
-  avatar.textContent = "🤖";
-  const body = document.createElement("div");
-  body.className = "msg-body";
-
-  const block = document.createElement("div");
-  block.className = "steps-block";
-
-  const head = document.createElement("div");
-  head.className = "steps-head";
-  const caret = document.createElement("span");
-  caret.className = "caret";
-  caret.textContent = "▾";
-  const label = document.createElement("span");
-  label.textContent = "思考过程（Thought / Action / Observation）";
-  head.append(caret, label);
-
-  const stepsBody = document.createElement("div");
-  stepsBody.className = "steps-body";
-
-  head.addEventListener("click", () => {
-    const collapsed = stepsBody.classList.toggle("collapsed");
-    caret.textContent = collapsed ? "▸" : "▾";
-  });
-
-  block.append(head, stepsBody);
-  body.appendChild(block);
-  container.append(avatar, body);
-  el.chatLog.appendChild(container);
-  scrollToBottom();
-
-  currentStepsBlock = { block, stepsBody };
-  return currentStepsBlock;
-}
-
-function endStepsBlock() {
-  currentStepsBlock = null;
-}
-
-function addStepLine(type, text) {
-  const { stepsBody } = startStepsBlock();
-  const line = document.createElement("div");
-  line.className = `step-line step-${type}`;
-  if (type === "action") {
-    const tag = document.createElement("span");
-    tag.className = "step-tag";
-    tag.textContent = "🔧 Action";
-    line.append(tag, document.createTextNode(` ${text}`));
-  } else if (type === "observation") {
-    const tag = document.createElement("span");
-    tag.className = "step-tag";
-    tag.textContent = "👁 Observation";
-    line.append(tag, document.createTextNode(` ${text}`));
-  } else if (type === "error") {
-    const tag = document.createElement("span");
-    tag.className = "step-tag";
-    tag.textContent = "⚠️";
-    line.append(tag, document.createTextNode(` ${text}`));
-  } else {
-    line.textContent = text;
-  }
-  stepsBody.appendChild(line);
-  scrollToBottom();
-}
-
-function addRawStreamLine(text) {
-  const { stepsBody } = startStepsBlock();
-  let raw = stepsBody.querySelector(".step-raw");
-  if (!raw) {
-    raw = document.createElement("div");
-    raw.className = "step-raw";
-    stepsBody.appendChild(raw);
-  }
-  raw.textContent = text;
-  scrollToBottom();
-}
-
-/** 最终答案打字机流式渲染 */
-function typeWriter(bubble, text, onDone) {
-  bubble.classList.add("streaming");
-  let index = 0;
-  const SPEED = 8; // ms / 字符
-  const timer = setInterval(() => {
-    index += 1;
-    bubble.textContent = text.slice(0, index);
-    scrollToBottom();
-    if (index >= text.length) {
-      clearInterval(timer);
-      bubble.classList.remove("streaming");
-      onDone?.();
-    }
-  }, SPEED);
-  return () => clearInterval(timer);
-}
-
-function scrollToBottom() {
-  el.chatLog.scrollTop = el.chatLog.scrollHeight;
-}
-
-// ---------------------------------------------------------------------------
-// 发送：委托给 agent.chat，历史与失败落库由 embed 内部统一处理
-// ---------------------------------------------------------------------------
-
-let sending = false;
-let abortController = null;
-
-async function handleSend() {
-  // 正在发送中再次点击 sendBtn → 中止当前对话
-  if (sending && abortController) {
-    abortController.abort();
-    return;
-  }
-  const text = el.inputBox.value.trim();
-  if (!text) return;
-  if (!agent.getLoadedModelId()) {
-    el.errorBox.textContent = "请先加载模型再开始对话。";
-    el.errorBox.classList.remove("hidden");
-    return;
-  }
-  // 重置上轮可能残留的 steps 块（虽然 finally 已清，但用户快速连发 / 中断时
-  // 仍可能漏掉，这里兜底）
-  endStepsBlock();
-
-  sending = true;
-  abortController = new AbortController();
-  el.sendBtn.textContent = "停止";
-  el.sendBtn.disabled = false; // 保持可点击，用于中止
-  el.inputBox.value = "";
-
-  // 渲染用户消息 + 助手消息骨架（user 消息由 agent.chat 内部持久化）
-  appendMessage("user", text);
-  const bubble = appendMessage("ai", "…");
-
-  let stopTypewriter = null;
-
-  const onStep = (step) => {
-    switch (step.type) {
-      case "stream":
-        addRawStreamLine(step.text);
-        break;
-      case "raw":
-        break;
-      case "action": {
-        let pretty;
-        try {
-          pretty = JSON.stringify(step.input, null, 0);
-        } catch {
-          pretty = String(step.input);
-        }
-        addStepLine("action", `${step.name} ${pretty}`);
-        break;
-      }
-      case "observation": {
-        // 性能埋点：observation 新增 durationMs / ok / errorMessage，UI 显示耗时小灰字
-        const dur = typeof step.durationMs === "number" ? `${step.durationMs}ms` : "";
-        const status = step.ok === false ? " ❌" : " ✓";
-        addStepLine("observation", `${step.result}${dur ? `  ·  ${dur}${status}` : ""}`);
-        break;
-      }
-      case "ttft":
-        // 首 token 延迟（仅打印到 console，不渲染 UI）
-        console.log(`[app] 首 token 延迟: ${step.durationMs}ms (步长 ${step.stepDurationMs}ms)`);
-        break;
-      case "final":
-        if (stopTypewriter) stopTypewriter();
-        stopTypewriter = typeWriter(bubble, step.text, () => {});
-        break;
-      case "error":
-        addStepLine("error", step.message);
-        break;
-    }
-  };
-
-  try {
-    const result = await agent.chat(text, { onStep, signal: abortController.signal });
-    const finalAnswer = result.answer;
-    // 确保最终答案已渲染（若未走到 final 步骤）
-    if (stopTypewriter) stopTypewriter();
-    if (bubble.textContent !== finalAnswer) {
-      bubble.textContent = finalAnswer;
-      bubble.classList.remove("streaming");
-    }
-    const stats = agent.getStats();
-    const latest = stats.history[stats.history.length - 1];
-    console.log(
-      `[app] 完成（${result.steps.length} 步，ok=${result.ok !== false}，` +
-      `总耗时 ${latest?.totalDurationMs ?? 0}ms，工具 ${latest?.toolCallCount ?? 0} 次）`,
-      finalAnswer,
-    );
-  } catch (err) {
-    const isAborted = err?.name === "AbortError" || /abort|中止/i.test(err?.message ?? "");
-    console.error("[app] 对话失败:", err);
-    bubble.textContent = isAborted ? "（已中止）" : `出错了：${err?.message ?? err}`;
-    bubble.classList.remove("streaming");
-  } finally {
-    if (stopTypewriter) stopTypewriter();
-    endStepsBlock();
-    sending = false;
-    abortController = null;
-    el.sendBtn.textContent = "发送";
-    el.sendBtn.disabled = false;
-    el.inputBox.focus();
-    scrollToBottom();
-  }
-}
-
-el.sendBtn.addEventListener("click", handleSend);
-el.inputBox.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    handleSend();
-  }
-});
-el.inputBox.addEventListener("input", () => {
-  el.inputBox.style.height = "auto";
-  el.inputBox.style.height = `${Math.min(el.inputBox.scrollHeight, 140)}px`;
-});
-
-// ---------------------------------------------------------------------------
-// 新对话
-// ---------------------------------------------------------------------------
-
-el.newChatBtn.addEventListener("click", async () => {
-  await agent.clearHistory().catch(() => {});
-  el.chatLog.innerHTML = "";
-  const welcome = document.createElement("div");
-  welcome.className = "welcome";
-  welcome.innerHTML = `<div class="welcome-icon">🤖</div><h2>新对话已开始</h2><p>模型仍然保持加载，随时可以继续提问。</p>`;
-  el.chatLog.appendChild(welcome);
-  console.log("[app] 已清空对话历史");
-});
-
-// ---------------------------------------------------------------------------
-// 纯函数 helper（导出便于单测，不影响运行时）
-// ---------------------------------------------------------------------------
-
-export { shortModelName, friendlyModelName };

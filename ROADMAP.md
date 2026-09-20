@@ -5,7 +5,7 @@
 > **维护约定**：每完成一项，把 `[ ]` 改为 `[x]`，并在该项下用 `→` 追加一行验收结论（跑的命令 + 观察结果）。
 > 新增任务追加到对应批次末尾，不要回头改动已完成批次。
 >
-> 最后更新：2026-09-16
+> 最后更新：2026-09-20
 
 ## 固定动作（每批结束都要做）
 
@@ -13,11 +13,14 @@
 2. 同步文档：新增 / 变更的能力、命令、限制必须落到 `README.md` / `USAGE.md` / `INTEGRATION.md`
 3. 默认行为变更必须在提交信息里写明回退开关
 
-## 当前进度（2026-09-16）
+## 当前进度（2026-09-20）
 
-- **已完成**：第 0 批全部 7 项 + 第 1 批的 P0-1a（单元测试）/ P0-1c（补齐测试缺口）；`npm test` = **290 passed / 19 files**
-- **暂缓**：第 1 批剩余 4 项 —— P0-1b（ESLint，本地未安装 eslint）、P0-2 / P0-2b / P0-2c（需真实 WebGPU 做协议 A/B 与约束解码生效性确认）
-- **下一步建议**：第 2 批（P1-4 新增 9B 档、P0-3 修 SW 注册路径与 scope）——纯代码改动，**不依赖第 1 批结论**，可直接开工
+- **已完成**：第 0 批全部 7 项；第 1 批的 P0-1a（单元测试）/ P0-1c（补齐单测缺口）/ P0-1b（ESLint，已装齐并跑通零问题）；第 2 批的 P0-3（SW 注册路径与 scope，已实现待真机验收）
+- **测试基线**：`npm test` = **301 passed / 21 files**；`npm run lint`（`--max-warnings=0`）= **0 问题**
+- **暂缓**：第 1 批剩余 3 项 —— P0-2 / P0-2b / P0-2c（需真实 WebGPU 做协议 A/B 与约束解码生效性确认）
+- **下一步建议**：第 2 批的 P1-4（新增 9B 档位）——纯代码改动，**不依赖第 1 批结论**，可直接开工
+
+> 2026-09-20 附带完成（原先不在计划内）：三协议之外的 SW 策略矩阵修复（`public/sw.js` 的 `async` 签名 bug 导致所有同源 GET 走 cache-first）；三个页面重复聊天实现的组件化重构（新增 `src/chatWidget.js` + `.css`）；`search.html` 纳入生产构建（多入口）。详见提交历史。
 
 ## 第 0 批 · 本轮已完成（端到端行为待 P0-2 实测）
 
@@ -46,9 +49,10 @@
 - [x] **P0-1a 单元测试**
   命令：`npm test`
   → 结论（2026-09-16）：**通过**。既有用例全绿（`react` 仍为默认协议，`Observation:` 前缀断言未受影响），新增 `agentLoop.protocol.test.js` 全绿
-- [ ] **P0-1b ESLint**
+- [x] **P0-1b ESLint**
   命令：`npm run lint`（CI 有 `--max-warnings=0` 门禁）
-  注：本地 `node_modules` 未安装 eslint，尚未执行
+  → 完成（2026-09-20）：装齐 devDeps；`eslint.config.js` 补 8 个缺失全局（performance/navigator/Response/caches/Event/getComputedStyle/Buffer/setImmediate）+ test config `files` 覆盖 `tests/**/*.mjs`；`tests/e2e.mjs` 补 `logs` 解构（真 bug——`collectConsole` 返回但被漏解构）
+  → 结果：`npm run lint` = **0 问题**（修复前 37，其中 32 为 globals 漏配导致的 `no-undef` 误报）；`package.json` 加 `precommit` script + `.git/hooks/pre-commit`（commit 前自动 lint，失败阻断）
 - [x] **P0-1c 补齐单测缺口**
   缺口：`stripThinking` 的 ` thinking` 分支、以及 `embed.js` 的三个存储 API（`getStorageEstimate` / `getCacheStatus` / `deleteModelArtifacts`）
   → 完成（2026-09-16）：`agentLoop.test.js` 加 3 条、`embed.test.js` 加 9 条；`npm test` = **290 passed / 19 files**（`agentLoop.test.js` 45、`embed.test.js` 24、`agentLoop.protocol.test.js` 23）
@@ -76,6 +80,10 @@
 - [ ] **P0-6（可选）抽出 `resolveToolProtocol(requested, modelId)`**
   现状：`auto` 判定是 `src/embed.js:275` 的内联表达式，不便单测
   验收：新单测覆盖 Qwen / 非 Qwen / 显式三值
+- [ ] **新模型接入验收补「解析器兼容性」一条**
+  依据：2026-09-20 复审（二手评测）指出"工具调用成败取决于模型与解析器两者，且同等关键"——21 个模型评测中有 5 个因非标准输出格式需要自定义解析器，修正解析器后单模型得分从 0.640 跃升至 0.880
+  做法：`README.md` 的新模型接入清单（当前 5 条）补第 6 条——用该模型的实际输出跑一遍解析器，确认能被正确识别，必要时补解析路径
+  验收：清单更新；每接一个新档位时按该条执行
 
 ## 第 3 批 · 观感与存储可视化
 
@@ -110,11 +118,21 @@
   做法：自建 SearXNG，经 `server/dev-proxy.mjs` 同源转发（规避 CORS）；保留 Wikipedia 兜底
 - [ ] **门面打磨：`search.html` 一键演示**
   建议按钮：「现在几点」/「12×34」/「总结本页」——降低首次体验的认知成本（当前必须先下载 1.2GB 权重）
-- [ ] **低配置体验档（LFM2.5 230M / 350M ONNX）**
+- [ ] **低配置体验档（LFM2.5 1.2B / 230M / 350M ONNX）**
   目的：把首次体验门槛从 1.2GB 降到百 MB 级
+  候选调整（2026-09-20 复审，来源为二手评测、**需自行验证**）：有 21 模型工具调用评测显示 `lfm2.5:1.2b` 与 `qwen3:0.6b` 等并列第一且延迟最低，是"小体积 + 工具调用可用"的更好平衡点——低配置档可能应上调到 **1.2B 级别**（代价：ONNX 量化后数百 MB 级 vs 原计划百 MB 级）
   注意：Transformers.js 后端是 prompt-based 生成，**不支持** WebLLM 的 grammar 约束解码（`toolProtocol: "json"` 只对 MLC 档生效）
 - [ ] **统计面板（技术密度可视化）**
   数据已就绪：`getStats()`（TTFT / 工具耗时 / 失败率）、`failureLog`（最近 20 条失败原因）
+- [ ] **README 显式声明「不支持并行工具调用」**
+  依据：项目是顺序 ReAct（`MAX_STEPS` 循环，一次一个工具）；"多工具（并行 / 顺序）"是评测中区分强弱模型的关键类别，且存在"并行-顺序悖论"（最擅长并行的模型反而最不擅长判断顺序依赖）——对 1B 级模型顺序是更稳的保守选择
+  做法：`README.md`「已知限制」补一条，把隐性设计显性化，避免被误认为缺陷
+- [ ] **react 协议 few-shot 示例扩充（需实测决定）**
+  依据：2026-09-20 复审（二手评测）显示，把 persona 改写为带 3-5 个 "utterance → call" 具体示例后，弱模型提升 ≥20 分；当前 react 协议的 system prompt 只有 1 个示例（"现在几点"），而工具有 6 类（时间 / 计算 / 搜索 / 页面 / 记忆读写）
+  代价：示例占用 `SYSTEM_PROMPT_BUDGET`（3200 字符），且 `native` / `json` 协议不走 `buildSystemPrompt` → **只对 react 协议生效**，是否值得需实测
+- [ ] **档位推荐结合工具调用能力（当前只按硬件）**
+  依据：二手评测显示参数量不是工具调用能力的可靠指标（Qwen3 家族排名非单调，1.7B 处存在"能力谷"——够激进地调工具，却不足以判断何时**不该**调）；`recommendModelId` 目前只按显存 / 核心数选档
+  做法：若实测能取得各档工具调用成功率，可纳入推荐权重；当前 3 档（0.8B / 2B / 4B）是否都存在"能力谷"需实测确认
 - [ ] **`json` 模式的观感优化（是否要做取决于 P0-2 结论）**
   问题：约束解码下流式输出是 JSON 文本，"思考过程"里看不到自然语言
   思路：只在"工具决策步"用约束解码，最终回答改用自由文本生成（代价是多一次推理）

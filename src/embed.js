@@ -44,6 +44,9 @@ const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
  *        "json"   —— 约束解码模式：把 buildDecisionSchema() 作为 schema 交给 WebLLM 做 grammar
  *                    约束解码，模型只可能输出符合 schema 的 JSON（最稳，但流式输出内容是 JSON 文本）
  * @param {object} [options.memoryAdapter] 自定义记忆适配器（默认 IndexedDB）
+ * @param {boolean} [options.serviceWorker=true] 是否注册 Service Worker（嵌入场景设 false 避免抢占宿主 SW scope）
+ * @param {string} [options.swPath="/sw.js"] Service Worker 脚本路径（相对站点根）
+ * @param {string} [options.swScope] Service Worker scope；不传则用浏览器默认（sw.js 所在目录），避免硬编码 "/" 抢占宿主全站
  * @param {(e:{type:string, progress?:number, status?:string, file?:string, modelId?:string, message?:string, error?:Error})=>void} [options.onEvent]
  *        统一事件回调（progress / status / ready / hardware / error）
  * @param {(p:{progress:number, status?:string, file?:string, modelId?:string})=>void} [options.onProgress] 进度回调（0-1）
@@ -60,6 +63,9 @@ export function createLocalAgent(options = {}) {
     maxSteps = 5,
     toolProtocol = "auto",
     memoryAdapter = null,
+    serviceWorker = true, // 是否注册 Service Worker（嵌入场景可设 false 避免抢占宿主 SW scope）
+    swPath = "/sw.js", // Service Worker 脚本路径（相对站点根）
+    swScope, // Service Worker scope；不传则用浏览器默认（sw.js 所在目录）
     onEvent,
     onProgress,
     onStatus,
@@ -231,11 +237,17 @@ export function createLocalAgent(options = {}) {
    * @returns {Promise<void>}
    */
   async function registerServiceWorker() {
+    // 嵌入场景可设 serviceWorker:false 完全关闭（避免与宿主自有 SW 抢同一 scope）
+    if (serviceWorker === false) return;
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    // scope 默认不传：浏览器用 sw.js 所在目录（根部署时为 "/"，子路径部署且 sw.js 在子路径时自动收缩），
+    // 不再硬编码 scope:"/" 抢占宿主全站；宿主可通过 swScope 显式覆盖。
+    const registerOpts = swScope !== undefined ? { scope: swScope } : {};
     try {
-      // scope: "/" 让 SW 拦截同源的所有路径（含 /hf* 模型路由）
-      swRegistration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-      console.log("[embed] Service Worker 已注册 ✅（激活在后台进行，下次访问生效）");
+      swRegistration = await navigator.serviceWorker.register(swPath, registerOpts);
+      console.log(
+        `[embed] Service Worker 已注册 ✅（path=${swPath}，scope=${swScope ?? "默认(sw.js所在目录)"}，激活在后台进行，下次访问生效）`,
+      );
       emit({ type: "sw", registered: true });
     } catch (err) {
       console.warn("[embed] Service Worker 注册失败（不影响使用，离线缓存将不可用）:", err?.message ?? err);

@@ -47,19 +47,8 @@
       #la-progress-wrap .track { height: 6px; background: #1e293b; border-radius: 999px; overflow: hidden; }
       #la-progress-wrap .bar { height: 100%; width: 0%; background: linear-gradient(90deg, #2563eb, #7c3aed); transition: width 0.25s; }
       #la-progress-wrap .meta { display: flex; justify-content: space-between; margin-top: 4px; font-size: 11px; color: #94a3b8; }
-      #la-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-      #la-log .msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-      #la-log .msg.user { align-self: flex-end; background: #2563eb; border-bottom-right-radius: 4px; }
-      #la-log .msg.ai { align-self: flex-start; background: #1e293b; border-bottom-left-radius: 4px; }
-      #la-log .steps { align-self: flex-start; width: 100%; font-size: 12px; color: #94a3b8; border: 1px dashed #334155; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-      #la-log .steps .action { color: #60a5fa; }
-      #la-log .steps .observation { color: #fbbf24; }
-      /* 流式思考原文：模型输出含换行，必须保留换行与断词，否则会挤成一行 */
-      #la-log .steps .raw { color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-      #la-inputbar { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #1e293b; }
-      #la-input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; resize: none; font-family: inherit; }
-      #la-send { padding: 8px 14px; border: none; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
-      #la-send:disabled { opacity: 0.5; cursor: not-allowed; }
+      /* 消息区 + 输入区：由 src/chatWidget.js 统一渲染（样式见 src/chatWidget.css） */
+      #la-chat { flex: 1; min-height: 0; display: flex; }
       /* 错误提示条（WebGPU 不支持 / 代理未启动 / 加载失败） */
       #la-error { padding: 8px 12px; background: #7f1d1d; color: #fecaca; font-size: 12px; line-height: 1.6; white-space: pre-line; }
       #la-error[hidden] { display: none; }
@@ -101,18 +90,13 @@
         <div class="meta"><span id="la-pct">0%</span><span id="la-file">准备中…</span></div>
       </div>
       <div id="la-error" hidden></div>
-      <div id="la-log">
-        <div class="msg ai">你好！我是嵌入本页面的本地智能体。点击「加载模型」后即可向我提问（如：现在几点 / 12*34 等于多少）。</div>
-      </div>
-      <div id="la-inputbar">
-        <textarea id="la-input" rows="1" placeholder="输入消息，Enter 发送" disabled></textarea>
-        <button id="la-send" disabled>发送</button>
-      </div>
+      <div id="la-chat"></div>
     </div>
 
     <!-- 方式一（推荐，开发期）：直接 import 源码模块，由 dev server / 构建工具打包 -->
     <script type="module">
       import { createLocalAgent, getModelOptions, getDefaultModelId } from "/src/embed.js";
+      import { createChatWidget } from "/src/chatWidget.js";
 
       // ---------- DOM 引用 ----------
       const el = {
@@ -124,8 +108,6 @@
         errorBox: document.getElementById("la-error"),
         loadBtn: document.getElementById("la-load"),
         modelSelect: document.getElementById("la-model"),
-        input: document.getElementById("la-input"),
-        sendBtn: document.getElementById("la-send"),
       };
 
       function showError(message) {
@@ -187,8 +169,7 @@
               // 不禁用按钮：用户可从下拉换档后点「重新加载」（与 src/main.js 一致）
               el.loadBtn.textContent = "重新加载";
               el.loadBtn.disabled = false;
-              el.input.disabled = false;
-              el.sendBtn.disabled = false;
+              widget.setEnabled(true);
               console.log("✅ 模型已就绪（嵌入 demo）:", event.modelId);
               break;
             case "error":
@@ -238,80 +219,13 @@
         }
       });
 
-      // ---------- 对话 ----------
-      const log = document.getElementById("la-log");
-      const input = el.input;
-      const sendBtn = el.sendBtn;
-
-      function addBubble(role, text) {
-        const node = document.createElement("div");
-        node.className = `msg ${role}`;
-        node.textContent = text;
-        log.appendChild(node);
-        log.scrollTop = log.scrollHeight;
-        return node;
-      }
-
-      let stepsEl = null;
-      function addStep(type, text) {
-        if (!stepsEl) {
-          stepsEl = document.createElement("div");
-          stepsEl.className = "steps";
-          log.appendChild(stepsEl);
-        }
-        const line = document.createElement("div");
-        line.className = type;
-        line.textContent = type === "action" ? `🔧 Action: ${text}` : type === "observation" ? `👁 ${text}` : text;
-        stepsEl.appendChild(line);
-        log.scrollTop = log.scrollHeight;
-      }
-
-      async function send() {
-        const text = input.value.trim();
-        if (!text) return;
-        input.value = "";
-        sendBtn.disabled = true;
-        addBubble("user", text);
-        const bubble = addBubble("ai", "…");
-        stepsEl = null;
-        try {
-          const { answer = "" } = await agent.chat(text, {
-            onStep: (step) => {
-              if (step.type === "action") addStep("action", `${step.name} ${JSON.stringify(step.input ?? {})}`);
-              else if (step.type === "observation") addStep("observation", step.result);
-              else if (step.type === "error") addStep("observation", `⚠️ ${step.message}`);
-            },
-            onDelta: (full) => {
-              // 流式：思考过程原文实时更新
-              if (!stepsEl) addStep("raw", full);
-              else {
-                let raw = stepsEl.querySelector(".raw");
-                if (!raw) { raw = document.createElement("div"); raw.className = "raw"; stepsEl.appendChild(raw); }
-                raw.textContent = full;
-              }
-              log.scrollTop = log.scrollHeight;
-            },
-          });
-          // 最终答案打字机渲染（长文本按步长加速，避免逐字太慢）
-          bubble.textContent = "";
-          const stride = Math.max(1, Math.ceil(answer.length / 120));
-          let i = 0;
-          const timer = setInterval(() => {
-            i = Math.min(answer.length, i + stride);
-            bubble.textContent = answer.slice(0, i);
-            log.scrollTop = log.scrollHeight;
-            if (i >= answer.length) clearInterval(timer);
-          }, 16);
-        } catch (err) {
-          bubble.textContent = `出错了：${err.message}`;
-        } finally {
-          sendBtn.disabled = false;
-        }
-      }
-
-      sendBtn.addEventListener("click", send);
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+      // ---------- 聊天（统一组件：消息 / 思考过程 / 打字机 / 中止） ----------
+      const widget = createChatWidget({
+        container: document.getElementById("la-chat"),
+        agent,
+        welcomeHtml:
+          "你好！我是嵌入本页面的本地智能体。点击「加载模型」后即可向我提问（如：现在几点 / 12*34 等于多少）。",
+        onStatus: (msg) => showError(msg),
       });
 
       // ---------- 页面就绪 ----------

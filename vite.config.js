@@ -13,6 +13,7 @@
  *       npm run dev
  */
 import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
 
 const MODEL_PROXY_TARGET = process.env.PROXY_TARGET ?? "http://127.0.0.1:8787";
 
@@ -31,5 +32,14 @@ export default defineConfig({
     target: "es2022",
     outDir: "dist",
     chunkSizeWarningLimit: 2048,
+    // 多入口：index.html（主应用）+ search.html（搜索页嵌入演示）都要进生产构建。
+    // 不配则 Vite 只产出 index.html，部署后 /search.html 会 404
+    //（public/sw.js 的 APP_SHELL 预缓存 /search.html 也会失败）。
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        search: fileURLToPath(new URL("./search.html", import.meta.url)),
+      },
+    },
   },
 });

@@ -18,7 +18,7 @@ const ONLY_LOAD = process.argv.includes("--only-load");
 
 const browser = await launchBrowser({ headless: true });
 const page = await browser.newPage();
-const { errors, warnings } = collectConsole(page);
+const { errors, warnings, logs } = collectConsole(page);
 
 const results = [];
 function record(name, ok, detail = "") {

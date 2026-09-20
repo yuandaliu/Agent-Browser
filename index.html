@@ -63,32 +63,9 @@
           </div>
         </aside>
 
-        <!-- 右侧：聊天面板 -->
+        <!-- 右侧：聊天面板（内容由 src/chatWidget.js 统一渲染，与 search / demo 共用） -->
         <section class="chat-panel" data-local-agent-ui>
-          <div id="chat-log" class="chat-log" aria-live="polite">
-            <div class="welcome">
-              <div class="welcome-icon">🤖</div>
-              <h2>你好，我是本地智能体</h2>
-              <p>
-                我的模型完全运行在你的浏览器里（WebGPU），不上传对话。
-                <br />先点击左侧「加载模型」，然后就可以开始对话了。
-              </p>
-            </div>
-          </div>
-
-          <div class="chat-input-bar">
-            <textarea
-              id="input-box"
-              class="input-box"
-              rows="1"
-              placeholder="输入消息，Enter 发送，Shift+Enter 换行…"
-              disabled
-            ></textarea>
-            <div class="chat-actions">
-              <button id="new-chat-btn" class="btn btn-ghost" type="button" title="清空当前对话历史">🔄 新对话</button>
-              <button id="send-btn" class="btn btn-accent" type="button" disabled>发送</button>
-            </div>
-          </div>
+          <div id="chat-widget" class="chat-widget-mount"></div>
         </section>
       </main>
     </div>

@@ -9,11 +9,14 @@
  *   - 应用 chunks（/assets/*, /dist-embed/*）    → stale-while-revalidate
  *   - 导航请求（HTML）                          → network-first + cache fallback
  *
- * 重要：本文件的策略函数与 src/swStrategies.js 同步维护（见 swStrategies.js 顶部注释）。
- *       SW 不支持 ESM import，所以这里 inline 复制。每次改一处必须改另一处，
- *       单元测试（tests/unit/swStrategies.test.js）保证两者行为一致。
+ * 重要：本文件的策略函数与 src/swStrategies.js 人工同步维护（见 swStrategies.js 顶部注释）。
+ *       SW 不支持 ESM import，所以这里 inline 复制——每次改一处必须改另一处。
+ *       单测只覆盖 src/swStrategies.js；本文件因 SW 限制无法被单测直接覆盖，
+ *       由 tests/unit/swSync.test.js 做签名与路径一致性守卫，改动后务必手动验证 SW 实际行为。
  *
- * 版本号：升级缓存策略或修改了 SW 内任意函数时同步递增 VERSION，activate 阶段会自动清理旧缓存。
+ * 版本号：缓存**内容或策略**变化时递增 VERSION（activate 阶段会清理旧缓存）。
+ *       仅修代码逻辑、不改变缓存内容时不必递增——否则会连带清掉模型权重缓存，
+ *       迫使所有用户重新下载（1.2GB 级），代价极高。
  * cacheFirst 在 fetch 拿到 4xx/5xx 时透传上游响应，不替换为 503——否则会掩盖真实错误。
  */
 
@@ -28,7 +31,7 @@ const APP_SHELL = ["/", "/index.html", "/search.html"];
 // 策略函数（SYNC-MARKER: 与 src/swStrategies.js 同步）
 // ============================================================
 
-async function isModelRequest(url) {
+function isModelRequest(url) {
   if (!url || !url.pathname) return false;
   return (
     url.pathname.startsWith("/hf/") ||
@@ -37,7 +40,7 @@ async function isModelRequest(url) {
   );
 }
 
-async function isAppChunkRequest(url) {
+function isAppChunkRequest(url) {
   if (!url || !url.pathname) return false;
   return (
     url.pathname.startsWith("/assets/") ||

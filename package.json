@@ -12,6 +12,7 @@
     "build:embed": "vite build --config vite.embed.config.js",
     "preview": "vite preview",
     "lint": "eslint src tests server",
+    "precommit": "eslint src tests server --max-warnings=0",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "node tests/e2e.mjs",

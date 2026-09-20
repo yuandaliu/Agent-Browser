@@ -50,6 +50,16 @@ export default [
         process: "readonly",
         globalThis: "readonly",
         indexedDB: "readonly", // 浏览器 IndexedDB
+        // 浏览器 / Service Worker 全局（src/agentLoop、embed、tools、swStrategies、e2e 用到）
+        performance: "readonly",
+        navigator: "readonly",
+        Response: "readonly",
+        caches: "readonly",
+        Event: "readonly",
+        getComputedStyle: "readonly",
+        // Node 全局（dev-proxy、devProxy.fallback.test 用到）
+        Buffer: "readonly",
+        setImmediate: "readonly",
       },
     },
     rules: {
@@ -67,7 +77,7 @@ export default [
   },
   {
     // 测试文件更宽松：vitest 全局函数 + 测试不需要 strict unused
-    files: ["tests/**/*.js", "**/*.test.js"],
+    files: ["tests/**/*.js", "tests/**/*.mjs", "**/*.test.js"],
     languageOptions: {
       globals: {
         describe: "readonly",

@@ -6,8 +6,10 @@
  *      inline 复制了相同实现（公开注释标记 SYNC-MARKER）。
  *   2. tests/unit/swStrategies.test.js（单测） —— 通过 ESM import 覆盖所有路径。
  *
- * 同步维护策略：每次修改本文件，请同步修改 public/sw.js 的相应函数；
- * 单元测试覆盖的即是这里的行为，所以 SW 出问题会立即被测试发现。
+ * 同步维护策略：每次修改本文件，请同步修改 public/sw.js 的相应函数。
+ * 注意：单测（swStrategies.test.js）只覆盖本文件；public/sw.js 因 SW 不支持 ESM import
+ * 无法被单测直接覆盖，由 tests/unit/swSync.test.js 做签名与路径一致性守卫——
+ * 守卫只能防"两文件漂移"，不能验证 SW 实际运行行为，改动 sw.js 后务必手动验证。
  *
  * 缓存策略矩阵：
  *   - 模型权重（/hf*, /hf-transformers*, /gh-raw*）   → cache-first（权重不变，命中即用）
