@@ -86,7 +86,7 @@ export function buildToolsJsonLines() {
 /**
  * Qwen3 / Qwen3.5 原生工具协议提示词。
  *
- * 为什么不再用自创格式：模型的 chat_template 已定义了它训练过的工具协议——
+ * 为什么用模型原生格式：模型的 chat_template 已定义了它训练过的工具协议——
  *   system 段给出 "# Tools" + <tools> 内的函数 JSON；
  *   模型以 <tool_call><function=name><parameter=k>v</parameter></function></tool_call> 回复；
  *   工具结果以 <tool_response>…</tool_response> 回传（见 runAgent 的 observation 包装）。
@@ -210,7 +210,7 @@ export function stripThinking(text) {
     .replace(/<\|thinking\|>/gi, "thinking\n")
     .replace(/<\|\/thinking\|>/gi, "response\n")
     // Qwen3.5 / Qwen3 的 chat template 用标准 XML 标签包裹推理段（<think>…</think>，见
-    // enable_thinking 分支），与早期 <|thinking|> 特殊 token 是两套写法，这里一并归一为
+    // enable_thinking 分支），与 <|thinking|> 特殊 token 是两套写法，这里一并归一为
     // thinking/response 标记，复用下方同一正则。
     .replace(/<\s*think\s*>/gi, "thinking\n")
     .replace(/<\s*\/\s*think\s*>/gi, "response\n");
@@ -583,8 +583,8 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     }
     rawTexts.push(text);
 
-    // json 协议先按"决策 JSON"解析（约束解码的产物）；不匹配则回退到既有解析路径。
-    // react / native 协议不进入该分支，行为与改动前完全一致。
+    // json 协议先按"决策 JSON"解析（约束解码的产物）；不匹配则回退到通用解析路径。
+    // react / native 协议不进入该分支。
     const parsed = (protocol === "json" ? parseStructuredDecision(text) : null) ?? parseReActOutput(text);
     emit({ type: "raw", text });
 

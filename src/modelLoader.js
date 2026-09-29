@@ -88,8 +88,8 @@ export function getDefaultModelId() {
  *   4. 8 核及以上     → 候选顺序不变，但 high 档有 recommended 时仍优先 high；
  *                       若想让高核机器直接上 ultra，可把 Qwen3.5-4B 也标 recommended。
  *
- * 注意：候选 tier 顺序是从 MODEL_OPTIONS 实际存在的 tier 动态推导的，
- * 不再硬编码 mid 这种可能不存在的 tier。删除/新增 tier 后无需改本函数。
+ * 注意：候选 tier 顺序是从 MODEL_OPTIONS 实际存在的 tier 动态推导的——
+ * 增删 tier 后无需改本函数，也不会引用到不存在的 tier。
  *
  * @param {object} snapshot - 来自 ai.probeHardware() 的结果（含 webgpuSupported / webgpuReason 等）
  * @returns {string} 模型 ID（保证在 MODEL_OPTIONS 中存在）

@@ -269,11 +269,10 @@ export class MemoryStore {
 }
 
 // ---------------------------------------------------------------------------
-// 模块级 helper：纯逻辑（无需单例 / 浏览器初始化）
+// 直接访问存储（可选）
 // ---------------------------------------------------------------------------
-// 注：早期版本提供过 getMemoryStore() / resetMemorySingleton() 单例 helper，
-// 但所有调用方（main.js 等）已改用 createLocalAgent().getMemories() 等封装接口。
-// 单例模式反而引入"跨实例状态污染"风险，已移除。如需直接访问 store：
+// 常规路径是 createLocalAgent() 的 getMemories() / getHistory() 等封装接口；
+// 需要绕过封装直接操作时：
 //   import { MemoryStore } from "./memory.js";
 //   const store = new MemoryStore();
 //   await store.init();

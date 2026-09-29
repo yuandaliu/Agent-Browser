@@ -241,7 +241,7 @@ export function createLocalAgent(options = {}) {
     if (serviceWorker === false) return;
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
     // scope 默认不传：浏览器用 sw.js 所在目录（根部署时为 "/"，子路径部署且 sw.js 在子路径时自动收缩），
-    // 不再硬编码 scope:"/" 抢占宿主全站；宿主可通过 swScope 显式覆盖。
+    // 因此不会默认接管宿主全站；宿主可通过 swScope 显式覆盖。
     const registerOpts = swScope !== undefined ? { scope: swScope } : {};
     try {
       swRegistration = await navigator.serviceWorker.register(swPath, registerOpts);
@@ -302,8 +302,8 @@ export function createLocalAgent(options = {}) {
           toolProtocol: protocol,
           // 不传 runtime：让 SDK 完全使用当前加载模型的 preset.defaultRuntime
           // （含 maxTokens / temperature / topP / repetitionPenalty / disableThinking）。
-          // 这样切到不同 tier（Qwen3.5 0.8B/2B/4B）时自动应用各自最优参数，
-          // 不再硬编码 768 tokens 覆盖 preset 推荐值（0.8B 默认 512、2B 默认 640、4B 默认 768）。
+          // 这样切到不同 tier（Qwen3.5 0.8B/2B/4B）时自动应用各自参数
+          // （maxTokens 分别为 512 / 640 / 768），不会用固定值覆盖 preset 推荐值。
           generate: async (messages, generateCallbacks) =>
             ai.generateText(messages, {
               onDelta: generateCallbacks.onDelta ?? onDelta,

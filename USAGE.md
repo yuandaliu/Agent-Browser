@@ -9,7 +9,7 @@
 
 ### 第 1 步：环境检查
 
-- Node.js ≥ 20（`node -v`）
+- Node.js **≥ 20.19**（或 ≥ 22.12，Vite 7 的要求；`node -v` 确认）
 - 浏览器：Chrome / Edge 最新版，支持 **WebGPU**（`chrome://gpu` 查看）
 
 ### 第 2 步：安装依赖（首次）
@@ -35,14 +35,18 @@ npm run dev
 ```
 打开页面 → 顶部徽章应显示 "WebGPU ✓"
   ↓
-左侧选模型（页面初次默认 Qwen3.5 0.8B，ready() 后自动切到推荐档 Qwen3.5 2B）→ 点击「加载模型」
+左侧选模型（下拉初始为最低档 Qwen3.5 0.8B —— 见下方注意事项，建议先手动切到 2B）→ 点击「加载模型」
   ↓
-进度条 0% → 100%（默认档 Qwen3.5 2B 约 1.2GB，3-15 分钟；之后走缓存秒开）
+进度条 0% → 100%（2B 档约 1.2GB，3-15 分钟；0.8B 约 447MB；之后走缓存秒开）
   ↓
 绿色提示「模型已就绪」+ 控制台输出 ✅ 模型已就绪
   ↓
 开始对话（输入框已解锁）
 ```
+
+> **注意**：「加载模型」加载的是**下拉当前选中项**，而 `ready()` 算出的硬件推荐档不会自动写回下拉
+> （主页面未接线，`REVIEW.md` A5）。可打开控制台观察 `[embed] 已初始化` 附近的 status 文本，或用
+> `agent.getRecommendedModelId()` 查看推荐结果，再手动选择对应档位。
 
 ### 第 5 步：验证对话能力（验收用例）
 
@@ -96,6 +100,7 @@ npm run dev
 | `npm run build` | 构建应用产物（dist/） | — |
 | `npm run build:embed` | 构建嵌入单文件产物（dist-embed/） | — |
 | `npm run lint` | ESLint 检查（src / tests / server） | — |
+| `npm run precommit` | ESLint 严格模式（`--max-warnings=0`），与 CI 门禁一致；仓库已配 `.git/hooks/pre-commit` | — |
 | `npm test` | 单元测试（vitest） | 无需服务 |
 | `npm run test:coverage` | 单元测试 + 覆盖率报告 | 无需服务 |
 | `npm run test:probe` | 页面探测：加载按钮 / WebGPU / 控制台零报错（不加载模型） | proxy + dev |
@@ -109,9 +114,10 @@ npm run dev
 | 问题 | 处理 |
 | --- | --- |
 | 徽章显示 `WebGPU ✗` | 更新浏览器、开启硬件加速、更新显卡驱动 |
-| 进度条长时间不动 | hf-mirror 偶发超时。`dev-proxy` 已内置 **3 次重试**（每次间隔 500ms，总耗时 ≤ 1.5s），无需手动操作；若仍失败，查看代理终端是否有 `dev-proxy upstream error` 日志，再点「重试加载」 |
+| 进度条长时间不动 | hf-mirror 偶发超时。`dev-proxy` 会自动处理：单上游网络错误重试 **1 次**（间隔 300ms）、每上游 **12s 超时**，失败即切换下一个镜像（`/hf*`、`/hf-transformers/*` 为 hf-mirror.com → hf-api.cn；`/gh-raw/*` 为 jsdelivr → jsdmirror → ghproxy），上游返回 5xx 时同样换下一个。无需手动操作；若仍失败，查看代理终端是否有 `dev-proxy upstream error` 日志，再点「重试加载」 |
 | 提示 Proxy Worker 未激活 | 确认 `npm run proxy` 已启动、8787 未被占用；首次启动需等几秒（健康检查端点 `/__worker-health`） |
 | 端口被占用（5189/8787） | 关闭残留 node 进程后重启（Windows：先 `Get-Process node` 查进程，再用 `Stop-Process` 结束） |
-| 模型答非所问 / 不调工具 | 1B 模型能力有限属预期。可在下拉里直接切到 Qwen3.5 2B 或 4B（不需要改代码）；或调高 `createLocalAgent({ maxSteps })`（默认取 `src/agentLoop.js` 的 `MAX_STEPS = 5`）允许多轮试错 |
+| 模型答非所问 / 不调工具 | 先确认**当前档位**：0.8B 档的工具调用能力明显弱于 2B（官方自测 BFCL-V4 25.3 vs 43.6、TAU2-Bench 11.6 vs 48.8），且**自动推荐目前只会给出 2B**，需要更高能力请在页面下拉里手动切到 4B。此外可调高 `createLocalAgent({ maxSteps })`（默认取 `src/agentLoop.js` 的 `MAX_STEPS = 5`）允许多轮试错 |
+| `npm run dev` 或 `npm test` 直接报错 | 多为 Node 版本过低——Vite 7 要求 **Node ≥ 20.19（或 ≥ 22.12）**，低于该版本会报 `node:fs/promises does not provide an export named 'constants'`。`node -v` 确认后升级 Node |
 | 公网部署代理被刷流量 | 设置环境变量 `PROXY_TOKEN=xxx` 开启令牌校验，所有请求必须带 `X-Proxy-Token: xxx` 头或 `?token=xxx` 查询参数（详见 `server/dev-proxy.mjs` 顶部注释） |
 | 离线刷新后页面空白 | Service Worker 注册失败（iframe 嵌入 / 非 HTTPS / SW 路径错误）。DevTools → Application → Service Workers 查看注册状态；首次注册后需**刷新一次**才能完全接管请求 |

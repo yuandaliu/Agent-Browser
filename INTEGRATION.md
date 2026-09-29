@@ -61,13 +61,18 @@ import { createLocalAgent } from "./embed.js";
 
 const agent = createLocalAgent({
   // modelId 留空或传 "auto"（默认）：ready() 内部探测硬件（WebGPU + 核数），
-  // 通过 onEvent 的 "model-recommended" 事件告知推荐档位，下拉自动切到该项
-  // modelId: "Qwen3.5-2B-q4f16_1-MLC",  // 也可显式指定
+  // 通过 onEvent 的 "model-recommended" 事件 + status 文本告知推荐档位。
+  // ⚠️ 推荐结果不会自动生效：宿主需要自己消费该事件（例如把下拉切到 e.modelId），
+  //    否则 load() 会加载 options.modelId 或最低档（详见下方 modelId 选项与 REVIEW.md A5）。
+  // modelId: "Qwen3.5-2B-q4f16_1-MLC",  // 也可显式指定，跳过探测
   onProgress: ({ progress, status }) => renderProgressBar(progress, status), // 0-1
   onReady: ({ modelId }) => enableChatUI(modelId),
   onError: (err) => showError(err.message),
   onEvent: (e) => {
-    if (e.type === "model-recommended") console.log(`为你的设备推荐：${e.modelId}`);
+    if (e.type === "model-recommended") {
+      console.log(`为你的设备推荐：${e.modelId}`);
+      modelSelect.value = e.modelId; // ← 宿主需自行接线，推荐档才会真正被使用
+    }
   },
 });
 
@@ -113,14 +118,17 @@ const { answer } = await agent.chat("现在几点", {
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `modelId` | `"auto"` → Qwen3.5-2B | 同步 fallback 为 Qwen3.5-0.8B；`ready()` 后按硬件推荐为 Qwen3.5-2B |
+| `modelId` | `"auto"` | `"auto"` 时由 `ready()` 探测硬件算出推荐档（当前实现总是落在 Qwen3.5 2B，见 `REVIEW.md` A5）。**注意**：推荐值不会自动被 `load()` 使用——传了显式 id 用显式 id，`"auto"` 用推荐档，而主页面是显式传下拉值（初始为 0.8B）。同步 fallback（未探测前）为 Qwen3.5-0.8B |
 | `modelSource` | `"proxy"` | `"proxy"` 走同源路由下载；`"direct"` 直连 HuggingFace |
 | `proxyOrigin` | 本地 127.0.0.1 / 托管页面同源 | 本地强制 IPv4 loopback；远程部署用 `location.origin` |
 | `verifyProxy` | 本地 true / 托管 false | 是否探测代理健康 |
-| `maxSteps` | 5 | ReAct 最大循环步数 |
+| `maxSteps` | 5 | 工具调用循环最大步数 |
 | `toolProtocol` | `"auto"` | 工具调用协议：`"auto"`（Qwen 系走原生 `<tool_call>` / `<tool_response>`，其他模型走 ReAct）/ `"react"` / `"native"` / `"json"`（约束解码）。详见 `README.md`「工具调用协议」 |
 | `memoryAdapter` | `null`（IndexedDB） | 自定义记忆适配器 |
-| `onEvent` | — | 统一事件回调（`progress` / `status` / `ready` / `hardware` / `error` / `model-recommended`） |
+| `serviceWorker` | `true` | 是否注册 Service Worker。**嵌入宿主站点时建议设 `false`**，避免与宿主自有 SW 抢占 scope |
+| `swPath` | `"/sw.js"` | SW 脚本路径。子路径部署（如 `/local-agent/`）时必须改为实际路径，否则注册失败 |
+| `swScope` | 不传（浏览器默认=脚本所在目录） | SW scope。不传时用浏览器默认（sw.js 所在目录），不会接管宿主全站 |
+| `onEvent` | — | 统一事件回调（`progress` / `status` / `ready` / `hardware` / `model-recommended` / `sw` / `chat-stats`） |
 | `onProgress` / `onStatus` / `onReady` / `onError` | — | 拆分的加载事件回调 |
 
 > 智能体内置 `read_page_content` 工具：可读取**当前嵌入页面**的实时内容（标题 / URL / 正文，
@@ -152,15 +160,16 @@ npm run build:embed        # 产出 dist-embed/
 </script>
 ```
 
-> **产物体积**（`npm run build:embed` 实测，随 SDK 版本变化）：
-> - 入口 `local-agent.esm.js` 约 161KB（gzip 43KB）；
-> - WebLLM 引擎 chunk 约 6.3MB（gzip 2.2MB），首次 `load()` 时按需下载；
-> - Transformers.js 后端 chunk 约 63.8MB（gzip 17.6MB），仅在选用 ONNX 模型时加载。
+> **产物体积**（2026-09-27 在 SDK 0.1.0 / web-llm 0.2.84 下 `npm run build:embed` 实测，随 SDK 版本变化）：
+> - 入口 `local-agent.esm.js` 约 157KB（gzip 42KB）；
+> - WebLLM 引擎 chunk 约 6.0MB（gzip 2.1MB），首次 `load()` 时按需下载；
+> - Transformers.js 后端 chunk 约 60.9MB（gzip 16.9MB），仅在选用 ONNX 模型时加载；
+> - SW 脚本 `sw.js` 约 5KB。
 >
-> 方式二默认需把**整个 `dist-embed/` 目录**（约 70MB）上传到宿主同源路径，请确认静态托管的单文件体积与总容量允许。
+> 方式二默认需把**整个 `dist-embed/` 目录**（实测合计约 67MB）上传到宿主同源路径，请确认静态托管的单文件体积与总容量允许。
 > 两个 chunk 都是运行时动态 `import()`，入口不含 `modulepreload`，不影响页面首屏。
 >
-> **可以省掉 63.8MB 的情况**：仅当宿主只用 WebLLM / MLC 后端（即本项目 `MODEL_OPTIONS` 里的 3 个 `Qwen3.5-*-MLC` 档，
+> **可以省掉约 61MB 的情况**：仅当宿主只用 WebLLM / MLC 后端（即本项目 `MODEL_OPTIONS` 里的 3 个 `Qwen3.5-*-MLC` 档，
 > 且不会显式 `load()` 任何 Transformers.js（ONNX）模型）时，该 chunk 永远不会被请求，可在部署时不上传
 > `dist-embed/transformers.web-*.js`（按通配匹配，文件名含构建 hash，每次构建都会变；本地构建产物保留，
 > 后续要用随时补传）。反之，一旦加载 `transformers-js` 后端的模型就会按需请求它，缺失将直接 404 导致加载失败。
@@ -221,8 +230,9 @@ const agent = createLocalAgent({ modelId: "Qwen3.5-2B-q4f16_1-MLC" });
 
 ## 7. 浏览器要求：WebGPU
 
-本地 1B 模型推理需要 WebGPU：Chrome / Edge 最新版（开启硬件加速），建议独立显卡。无 GPU 环境会降级为
-软件渲染，速度很慢或不可用。宿主代码建议先检测：
+本地模型推理需要 WebGPU：Chrome / Edge 最新版（开启硬件加速），建议独立显卡。**不支持 WebGPU 时不会回退
+软件渲染**——SDK 会直接抛 `WebGPUUnavailableError`（仅 Whisper / Moonshine / Parakeet 转录与 TTS 档位可回退 wasm）。
+宿主代码建议先检测：
 
 ```js
 const agent = createLocalAgent({ onError: (err) => {
@@ -233,9 +243,10 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 
 ## 8. 首次加载体验
 
-- 首次 `load()` 需下载数百 MB 权重（Qwen3.5-0.8B 约 447MB，默认档 2B 约 1.2GB），**务必把进度回调渲染出来**；
-- 权重缓存在浏览器 Cache / IndexedDB（按域名隔离），二次加载秒级；
-- 建议在 UI 上提示“首次加载较慢，之后秒开”。
+- 首次 `load()` 需下载数百 MB 权重（0.8B 约 447MB、2B 约 1.2GB、4B 约 2.4GB，取决于所选档），**务必把进度回调渲染出来**；
+- 权重会写入**两处**存储：SDK 按 `cacheBackend` 写入 IndexedDB（`webllm/*`），SW 又会把同一批
+  `/hf*` 响应写入 Cache（`local-agent-models-v2`）——按域名隔离，二次加载秒级，但磁盘占用约为单份的两倍（见 `README.md` 已知问题）；
+- 建议在 UI 上提示“首次加载较慢，之后秒开”，并显示当前占用（`agent.getStorageEstimate()`）。
 
 ## 9. Service Worker 行为（宿主须知）
 
@@ -249,26 +260,34 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 | 非 HTTPS / 非 localhost | 注册失败（SW 强制 HTTPS） |
 | 浏览器不支持 SW（如早期 Safari） | 静默跳过，无任何错误 |
 
-- **想让 SW 工作**：同源直接嵌入开箱即用；iframe 场景宿主的 `<iframe allow=... sandbox=...>` 需允许 SW
-  （多数浏览器默认允许）；跨域嵌入需把 `public/sw.js` 上传到宿主站点根路径，并修改 `src/embed.js` 的
-  `register("/sw.js")` 为实际路径。
-- **想禁用 SW**：调用 `navigator.serviceWorker.getRegistrations()` 后 `unregister()`，或 fork `embed.js` 跳过注册。
-- **清除缓存**：宿主可提供按钮调用 `caches.delete("local-agent-models-v2")` 让用户清理磁盘空间
-  （缓存名与策略见 `README.md`「离线缓存」）。
+- **想让 SW 工作**：同源直接嵌入开箱即用；子路径部署（如 `/local-agent/`）时传 `swPath: "/local-agent/sw.js"`
+  并在需要时用 `swScope` 指定 scope；iframe 场景宿主的 `<iframe allow=... sandbox=...>` 需允许 SW
+  （多数浏览器默认允许）；跨域嵌入需把 `public/sw.js` 上传到宿主站点根路径并配置 `swPath`。
+- **想禁用 SW**：传 `serviceWorker: false`（推荐用于嵌入宿主站点，避免与宿主自有 SW 抢占 scope），
+  或调用 `navigator.serviceWorker.getRegistrations()` 后 `unregister()`。
+- **清除缓存**：宿主可提供按钮清理磁盘空间——注意**模型产物可能同时存在于两处**（SDK 的 IndexedDB +
+  SW 的 `local-agent-models-v2`），`agent.deleteModelArtifacts()` 只清前者，详见 `README.md`「离线缓存」
+  的已知问题与 `REVIEW.md` 的 A1。
 
 ## 10. 与宿主页面共存要点
 
 - **样式隔离**：`embed.js` 不注入任何样式；浮窗 UI（`demo/embed-demo.html` 的 `#la-*` 选择器）使用带前缀的
   类名，避免与宿主冲突。也可改用 Shadow DOM 挂载。
-- **无全局污染**：不修改 `window`、不拦截事件；仅占用一个 IndexedDB 数据库 `local-llm-agent`（消息历史 + 记忆）。
+- **全局副作用（须知）**：不修改 `window` 全局对象，但 `pageReader.js` 会做三件事——① patch
+  `history.pushState` / `history.replaceState`（用于感知 SPA 路由变化，幂等且不改写原有行为）；
+  ② 在 `document.body` 上注册一个 600ms 防抖的 `MutationObserver`；③ 监听 `popstate`。
+  宿主若也 patch 过这两个 history 方法，注意叠加顺序；不需要页面读取能力时可在 `dispose()` 后不再 `ready()`。
+  存储侧仅占用一个 IndexedDB 数据库 `local-llm-agent`（消息历史 + 记忆）。
 - **并发**：`chat()` 与 `load()` 均有单飞保护（同时只能有一个对话 / 一次加载在跑）。
-- **销毁**：页面卸载前调用 `agent.dispose()` 释放 WebGPU 上下文与 worker。
+- **销毁**：页面卸载前调用 `agent.dispose()` 释放 WebGPU 上下文、停止页面监听并移除 SDK 事件订阅。
 
 ## 11. 上线检查清单
 
 - [ ] 页面能打开且无控制台报错
 - [ ] 「加载模型」进度条 0→100%，二次打开走缓存秒开
 - [ ] 对话流式输出正常，思考过程（Action / Observation）可见
-- [ ] 首次加载提示已呈现（默认档约 1.2GB，请耐心等待）
+- [ ] 首次加载提示已呈现（2B 档约 1.2GB，请耐心等待）
+- [ ] 模型档位切换符合预期（`"auto"` 只影响 `ready()` 的推荐计算，**不会自动切换下拉**，见 A5）
 - [ ] 不支持 WebGPU 的浏览器有降级提示（`onError` 分支）
+- [ ] 嵌入场景已设置 `serviceWorker: false`（或正确配置 `swPath` / `swScope`）以免抢占宿主 SW
 - [ ] 已处理与宿主页面的样式冲突（浮窗类名加前缀或 Shadow DOM）

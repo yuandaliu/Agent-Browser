@@ -162,8 +162,8 @@ describe("createModelLoader — load 失败路径", () => {
   });
 });
 
-describe("createModelLoader — unload 路径（锁住这一轮修复）", () => {
-  it("unload() → emit modelunloaded 事件（关键修复）", async () => {
+describe("createModelLoader — unload 路径", () => {
+  it("unload() → emit modelunloaded 事件", async () => {
     await loader.load("Qwen3.5-2B-q4f16_1-MLC");
     events.length = 0; // 清空 load 阶段事件
 

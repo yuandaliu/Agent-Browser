@@ -11,10 +11,11 @@ for = "/*"
 Cross-Origin-Opener-Policy = "same-origin"
 Cross-Origin-Embedder-Policy = "require-corp"
 
-# 模型下载代理：页面同源 /hf*、/gh-raw* 路由 → 国内可访问镜像
+# 模型下载代理：页面同源 /hf*、/hf-transformers/*、/gh-raw/* 路由 → 国内可访问镜像
 # fallback 说明：Netlify redirects 是单上游，没法用平台原生配置做多上游 fallback。
-# 本地开发推荐用 server/dev-proxy.mjs（已支持 hf-mirror.com → hf-api.cn → ghproxy 三层 fallback）。
-# 生产环境如需自动 fallback，需替换为 Netlify Function。
+# 本地开发推荐用 server/dev-proxy.mjs（/hf* 支持 hf-mirror.com → hf-api.cn 两个上游，
+# /gh-raw* 支持 jsdelivr → jsdmirror → ghproxy 三个上游）。
+# 生产环境如需自动 fallback，需替换为 Netlify Function 或改用 Cloudflare Worker。
 [[redirects]]
 from = "/hf/*"
 to = "https://hf-mirror.com/:splat"
@@ -27,11 +28,12 @@ to = "https://hf-mirror.com/:splat"
 status = 200
 force = true
 
-# gh-raw 通用规则（不再硬编码 mlc-ai/binary-mlc-llm-libs 仓库，避免 WebLLM 升级到
-# 别的 wasm 库后这条规则静默 broken）。所有 /gh-raw/{owner}/{repo}/{branch}/{rest}
-# 形式都转发到 jsdelivr gh 路由。
+# gh-raw：/gh-raw/{owner}/{repo}/{branch}/{path} → https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}
+# 注意 jsdelivr 的版本分隔符是 "@" 而不是 "/"，因此必须用命名占位符做路径重排。
+# 若图省事写成 from = "/gh-raw/*" / to = "https://cdn.jsdelivr.net/gh/:splat"，
+# 拼出的 URL 会是 .../repo/branch/path（缺 @），jsdelivr 一律 404。
 [[redirects]]
-from = "/gh-raw/*"
-to = "https://cdn.jsdelivr.net/gh/:splat"
+from = "/gh-raw/:owner/:repo/:branch/*"
+to = "https://cdn.jsdelivr.net/gh/:owner/:repo@:branch/:splat"
 status = 200
 force = true
