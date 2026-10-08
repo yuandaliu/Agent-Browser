@@ -6,8 +6,8 @@
  *   - 订阅 loadprogress / status / modelloaded 事件，向 UI 输出 0-100 进度与状态文本
  *   - 加载完成后输出控制台日志「模型已就绪」
  *
- * 模型元数据（MODEL_OPTIONS）：每个选项含 tier / sizeMB / minVRAMGB / minCores / recommended
- * 字段，recommendModelId() 根据硬件能力自适应推荐默认档。
+ * 模型元数据（MODEL_OPTIONS）：每个选项含 tier / sizeMB / minVRAMGB / minCores /
+ * recommendMinCores（可选）/ recommended 字段，recommendModelId() 据此做设备自适应推荐。
  *
  * 国内开源策略：只列出 @missionsquad/browserai SDK 目录里"国内开源"的 WebLLM 文本
  * 模型。当前 SDK 目录里满足条件的只有阿里 Qwen3.5 系列；Gemma / Llama / Hermes 等国外
@@ -33,7 +33,8 @@ const MODEL_OPTIONS = [
     minVRAMGB: 1.6,
     minCores: 2,
     recommended: false,
-    description: "速度优先，能力受限，适合老旧设备（最低显存兜底）",
+    description:
+      "纯对话/抽取档，工具调用能力有限（官方自测 BFCL-V4 25.3 vs 2B 43.6、TAU2-Bench 11.6 vs 48.8），适合老旧设备兜底",
   },
   {
     id: "Qwen3.5-2B-q4f16_1-MLC",
@@ -43,17 +44,22 @@ const MODEL_OPTIONS = [
     minVRAMGB: 2.2,
     minCores: 4,
     recommended: true,
-    description: "速度与中文/工具调用能力平衡，国内开源主流档（默认推荐）",
+    description:
+      "速度与中文/工具调用能力平衡，国内开源主流档（默认推荐；官方自测 BFCL-V4 43.6 / TAU2-Bench 48.8）",
   },
   {
     id: "Qwen3.5-4B-q4f16_1-MLC",
-    label: "Qwen3.5 4B（高质量，~2.4GB / 6GB 显存）",
+    label: "Qwen3.5 4B（高质量，~2.4GB / 3.8GB 显存）",
     tier: "ultra",
     sizeMB: 2400,
-    minVRAMGB: 6,
+    // SDK MODEL_PRESETS.vramRequiredMB = 3867.82MB（= 3.78GB），此处按与 0.8B/2B 相同的
+    // "向上取整到 0.1GB"口径记为 3.8（此前误写为 6GB，见 REVIEW.md A4）
+    minVRAMGB: 3.8,
     minCores: 8,
+    // "能跑"（minCores）与"值得自动推荐"是两件事：8 核轻薄本不该被自动推 2.4GB 下载
+    recommendMinCores: 12,
     recommended: false,
-    description: "高质量档，需 6GB+ 显存",
+    description: "高质量档，需 3.8GB+ 显存；12 核以上设备才会被自动推荐（否则手动选择）",
   },
 ];
 
@@ -82,44 +88,66 @@ export function getDefaultModelId() {
  * 根据硬件能力推荐最合适的模型 ID。
  *
  * 决策逻辑（保守偏低端，确保不会选到跑不动的档）：
- *   1. 不支持 WebGPU → low 档
- *   2. 4 核以下       → low 档
- *   3. 4 核及以上     → 候选 ultra → high → low，优先带 recommended 标记的（Qwen3.5 2B）
- *   4. 8 核及以上     → 候选顺序不变，但 high 档有 recommended 时仍优先 high；
- *                       若想让高核机器直接上 ultra，可把 Qwen3.5-4B 也标 recommended。
+ *   1. 不支持 WebGPU → 最低档
+ *   2. 逐档过滤，需同时满足三条：
+ *      a. `cores >= minCores`                        —— 能跑起来的最低门槛
+ *      b. `cores >= recommendMinCores`（缺省回落 a）  —— 值得**自动推荐**的门槛
+ *      c. 显存预算 ≥ 该档的 minVRAMGB                  —— snapshot 无 deviceMemoryGB 时跳过
+ *   3. 通过的档里取**声明顺序最靠后**的（即档位最高的）；同档优先带 `recommended` 标记的
+ *   4. 全部不通过 → 最低档兜底
  *
- * 注意：候选 tier 顺序是从 MODEL_OPTIONS 实际存在的 tier 动态推导的——
- * 增删 tier 后无需改本函数，也不会引用到不存在的 tier。
+ * 优先级不硬编码 tier 名，而是取 MODEL_OPTIONS 的声明顺序（低档在前、高档在后）——
+ * 增删档位后本函数自动适配，不会引用到不存在的 tier。
  *
- * @param {object} snapshot - 来自 ai.probeHardware() 的结果（含 webgpuSupported / webgpuReason 等）
+ * 显存预算估计：`navigator.deviceMemory` 上报的是**系统内存**（且 Chrome 系被 clamp 到 8GB），
+ * 不是显存。这里用 `deviceMemoryGB × VRAM_BUDGET_RATIO` 作为预算代理，并把它当**上限**用——
+ * 宁可少推一档，也不要让用户下载 2.4GB 权重之后才发现跑不动。
+ *
+ * @param {object} snapshot - 来自 ai.probeHardware() 的结果（webgpuSupported / deviceMemoryGB 等）
  * @returns {string} 模型 ID（保证在 MODEL_OPTIONS 中存在）
  */
 export function recommendModelId(snapshot) {
+  const fallbackId = findByTier("low")?.id ?? FALLBACK_MODEL_ID;
+
   // 1) 不支持 WebGPU → 最低档
-  if (!snapshot?.webgpuSupported) {
-    return findByTier("low")?.id ?? FALLBACK_MODEL_ID;
-  }
+  if (!snapshot?.webgpuSupported) return fallbackId;
 
   // 2) 启发式硬件能力（navigator.hardwareConcurrency 不可用时默认 4）
   const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
+  const budgetMB = estimateVramBudgetMB(snapshot);
 
-  // 3) 按当前 MODEL_OPTIONS 实际存在的 tier 推导优先级（高 → 低）。
-  //    避免硬编码 tier 字符串，MODEL_OPTIONS 增删 tier 后本函数自动适配。
-  const existingTiers = new Set(MODEL_OPTIONS.map((m) => m.tier));
-  const orderedTiers = ["ultra", "high", "low"].filter((t) => existingTiers.has(t));
-  const tiers = cores >= 4 ? orderedTiers : ["low"].filter((t) => existingTiers.has(t));
+  // 3) 逐档过滤：核数门槛 + 推荐门槛 + 显存预算
+  const passed = MODEL_OPTIONS.filter((m) => {
+    if (cores < m.minCores) return false;
+    if (cores < (m.recommendMinCores ?? m.minCores)) return false;
+    if (budgetMB !== null && m.minVRAMGB * 1024 > budgetMB) return false;
+    return true;
+  });
+  if (passed.length === 0) return fallbackId;
 
-  // 4) 按 tier 优先级选：优先带 recommended 标记的，否则选该 tier 的第一个
-  for (const tier of tiers) {
-    const recommended = MODEL_OPTIONS.find((m) => m.tier === tier && m.recommended);
-    if (recommended) return recommended.id;
-  }
-  for (const tier of tiers) {
-    const any = MODEL_OPTIONS.find((m) => m.tier === tier);
-    if (any) return any.id;
-  }
+  // 4) 取声明顺序最靠后的档（= 最高档），同档优先 recommended
+  const order = new Map(MODEL_OPTIONS.map((m, i) => [m.id, i]));
+  const best = passed
+    .slice()
+    .sort((a, b) => {
+      const byOrder = order.get(b.id) - order.get(a.id);
+      if (byOrder !== 0) return byOrder;
+      return Number(b.recommended) - Number(a.recommended);
+    })[0];
+  return best.id;
+}
 
-  return FALLBACK_MODEL_ID;
+/** 显存预算占系统内存的比例（保守：浏览器/系统/其他标签页也要占内存） */
+const VRAM_BUDGET_RATIO = 0.6;
+
+/**
+ * 由 hardware snapshot 估算可用显存预算（MB）。
+ * snapshot 未提供 deviceMemoryGB（Firefox / Safari）时返回 null，表示"无该约束"。
+ */
+function estimateVramBudgetMB(snapshot) {
+  const gb = snapshot?.deviceMemoryGB;
+  if (typeof gb !== "number" || !Number.isFinite(gb) || gb <= 0) return null;
+  return gb * 1024 * VRAM_BUDGET_RATIO;
 }
 
 /**

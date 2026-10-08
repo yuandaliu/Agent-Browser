@@ -48,4 +48,21 @@ describe("public/sw.js 与 src/swStrategies.js 一致性守卫", () => {
     expect(isAppChunkRequest(new URL("http://x/assets/x.js"))).toBe(true);
     expect(isAppChunkRequest(new URL("http://x/hf/a/b"))).toBe(false);
   });
+
+  it("两文件均不得再缓存模型权重（REVIEW.md A1：cacheFirst 已整体移除）", () => {
+    const strategiesSrc = readFileSync(resolve("src/swStrategies.js"), "utf8");
+    // 定义与调用都不得残留：模型权重放行给浏览器，缓存唯一交给 SDK 的 IndexedDB
+    expect(swSrc).not.toMatch(/cacheFirst/);
+    expect(strategiesSrc).not.toMatch(/cacheFirst/);
+  });
+
+  it("模型缓存已移出 SW，且 VERSION 已递增到 v3+（否则历史死副本不会被回收）", () => {
+    // v3 起 SW 不再写 local-agent-models-*，但旧版本留下的副本仍占用户磁盘（2B 档 ~1.2GB），
+    // 必须靠 activate 的 "local-agent-" 前缀清理 + 版本递增才能收回来。
+    expect(swSrc).not.toMatch(/MODEL_CACHE/);
+    expect(swSrc).toMatch(/k\.startsWith\("local-agent-"\)/);
+    const versionMatch = swSrc.match(/const VERSION\s*=\s*"v(\d+)"/);
+    expect(versionMatch).not.toBeNull();
+    expect(Number(versionMatch[1])).toBeGreaterThanOrEqual(3);
+  });
 });

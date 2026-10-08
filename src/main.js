@@ -67,7 +67,7 @@ el.modelSelect.value = getDefaultModelId();
 
 let maxProgress = 0;
 
-function handleModelEvent(event) {
+export function handleModelEvent(event) {
   switch (event.type) {
     case "hardware": {
       const ok = event.snapshot.webgpuSupported;
@@ -86,6 +86,19 @@ function handleModelEvent(event) {
       el.progressPct.textContent = `${maxProgress}%`;
       if (event.status) el.progressStatus.textContent = event.status;
       if (event.file) el.progressStatus.textContent = event.file;
+      break;
+    }
+    case "model-recommended": {
+      // 硬件推荐档 → 写回下拉（与 demo/embed-demo.html 的既有实现一致）。
+      // 该事件在 "auto" 档位下由 ready() 触发一次，此后不再触发，所以直接覆盖即可，
+      // 不需要"用户手动改过就不再覆盖"的标志位——事件到达时用户还没机会改。
+      // 修复前：推荐结果只发事件而无人消费，而「加载模型」读的正是下拉当前值（初始为最低档
+      // 0.8B），于是"设备自适应"形同虚设（REVIEW.md A5）。
+      const recommended = getModelOptions().find((m) => m.id === event.modelId);
+      if (recommended) {
+        el.modelSelect.value = event.modelId;
+        el.modelSelect.title = `为你的设备推荐：${recommended.label}`;
+      }
       break;
     }
     case "status": {

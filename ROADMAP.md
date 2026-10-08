@@ -5,7 +5,7 @@
 > **维护约定**：完成一项即把 `[ ]` 改为 `[x]`；新增任务追加到对应批次末尾。
 > 变更与验证的过程由 git 记录，本文档只保留**计划、依据与结论**。
 >
-> 最后更新：2026-09-27
+> 最后更新：2026-09-28
 
 ## 固定动作（每批结束都要做）
 
@@ -15,12 +15,69 @@
 
 ## 当前状态
 
-- **测试与检查基线**：`npm test` = **301 passed / 21 files**；`npm run lint`（`--max-warnings=0`）= **0 问题**
-  （基线由合格 Node 环境跑出；当前环境 Node 版本低于 Vite 7 的要求，未复跑）
-- **已完成**：第 0 批全部；第 1 批的 P0-1a / P0-1b / P0-1c；第 2 批的 P0-3 与「解析器兼容性」条目
+- **测试与检查基线**：批次 A 之前为 `npm test` = **301 passed / 21 files**、`npm run lint`（`--max-warnings=0`）= **0 问题**
+  （已用 Node 22.23.2 复跑确认；本机默认 Node 16.14.1 低于 Vite 7 要求，需 `nvm use 22`）。
+  批次 A 调整了单测（新增快照矩阵 / 元数据锚定 / 接线 / SW 守卫，删除 cacheFirst 旧测），
+  **预计 ~311 条，待在合格环境复跑确认**
+- **已完成**：第 0 批全部；第 1 批的 P0-1a / P0-1b / P0-1c；第 2 批的 P0-3 与「解析器兼容性」条目；
+  **REVIEW 批次 A 的 A1 / A4 / A5 / A8 / A9**
 - **暂缓**：第 1 批的 P0-2 / P0-2b / P0-2c（需真实 WebGPU 做协议 A/B 与约束解码生效性确认）
-- **下一步**：见 `REVIEW.md` 的批次 A —— 建议只做 3 项必修（A1 双重缓存 / A5 推荐接线 / A8 文档），
-  A2 / A3 / A6 降级为"先测量"，A7 当前收益为 0
+- **下一步**：见下方「下一步行动清单（P0–P4）」
+- **批次 A 实施备注**：A1 采方案①（SW 不再拦截模型路径，`VERSION` v2→v3 以回收历史死副本）；
+  A4 的显存门槛按与 0.8B / 2B 相同的"向上取整到 0.1GB"口径定为 **3.8GB**（SDK 权威值 3867.82MB），
+  而非 REVIEW 建议的 3.9GB；A5 额外引入 `recommendMinCores`——4B 自动推荐门槛为 12 核，因为
+  `navigator.deviceMemory` 被 clamp 到 8GB，无法区分 8 核 16GB 与 16 核 32GB
+
+## 下一步行动清单（2026-09-28 制定）
+
+> **归属标记**：**你** = 需真机 WebGPU / 需人工决策；**可接手** = 无 WebGPU 环境即可完成。
+> 完成一项即把 `[ ]` 改为 `[x]`。P0 / P1 是批次 A 的收尾，未完成前不要开新功能。
+
+### P0 · 验证与提交（约 15 分钟）
+
+- [ ] **P0-A 切换 Node 版本**：`nvm use 22.23.2`（本机默认 16.14.1 跑不了 vitest）
+- [ ] **P0-B 跑门禁（你）**：`npm test`（预期 301 → ~311）、`npm run lint`；失败则把输出贴回按结果修
+- [ ] **P0-C 提交批次 A**：提交信息须写明回退开关
+      （A1 = 恢复 `public/sw.js` 的 `isModelRequest` 分支并递增 `VERSION`；A5 = 删除 `src/main.js` 的 `model-recommended` 分支）
+
+### P1 · 真机验收（你）——A1 / A5 唯一能被证明的地方
+
+- [ ] **P1-A** `npm run proxy` + `npm run dev` → 打开 <http://127.0.0.1:5189>
+  - **A5**：控制台 `[embed] 已初始化` 附近出现「为你的设备推荐：…」，且下拉自动切到推荐档（4 核以上应为 2B，不再是 0.8B）
+  - **A1**：DevTools → Application → Cache Storage 只有 `local-agent-app-v3`，**没有** `local-agent-models-*`；
+    从旧版本升级的浏览器里，遗留的 `local-agent-models-v2` 已被 activate 清掉
+  - **清理归零**：加载 2B 档后记录 `await agent.getStorageEstimate()` → `await agent.deleteModelArtifacts()` → 占用应回落到加载前量级
+  - **A1 离线回归（最容易出事的一条，必做）**：模型加载完成后，在 DevTools → Network 面板再次 `await agent.load()`，
+    确认**没有新的 `/hf/*` 请求**——这一步验证的是 REVIEW 的代码推断"SDK 缓存命中后不再发起 fetch"，
+    该推断**从未实测**。随后断网（或 Network 面板切 Offline）→ 刷新页面 → 再加载模型，**必须仍能就绪**。
+    **若失败**（离线加载不出来）：说明 SDK 仍会发 fetch，A1 需改采方案②——恢复 SW 拦截，但让
+    `deleteModelArtifacts()` 一并 `caches.delete("local-agent-models-*")`，并在 UI/README 说明存在两层缓存
+- [ ] **P1-B** `npm run test:offline`（需 proxy + dev 已启动）
+- [ ] **P1-C** `npm run test:e2e`（需真实 WebGPU）
+
+### P2 · 需人工决策
+
+- [ ] **P2-A** A5 的 12 核门槛是否接受（影响：8 核 16GB 机器不自动推 4B）；要改只动 `MODEL_OPTIONS` 的 `recommendMinCores`
+- [ ] **P2-B** 是否启动第 5 批（多模态 / 语音）：代价是 `dist-embed/` 从 ~6MB 涨到 67MB
+- [ ] **P2-C** `.tmp/verify-a1.mjs` / `verify-a5.mjs` 是否正式化到 `tests/`
+      （沙箱内不依赖 vitest 的等价验证脚本，当前留在 gitignore 的 `.tmp/`）
+
+### P3 · 真机测量（你）——批次 A′ 与第 1 批剩余
+
+- [ ] **P3-A** A2 采样参数：`temperature` 0.2–0.5 + `seed: null`（保留 `repetitionPenalty` / `frequencyPenalty`），连问 3 次看措辞变化与 `getStats().toolFailures`
+- [ ] **P3-B** A3 推理进 Worker：生成时用 Performance 面板看 long task 是否 >50ms 且频繁
+- [ ] **P3-C** A6 上下文：核实 MLC `max_history_size: 1` 的语义，并用长对话看 `failureLog` 有无 context 相关失败
+- [ ] **P3-D** P0-2 三协议 A/B（决定 `auto` 默认值）
+- [ ] **P3-E** P0-2c `json` 约束解码在 0.8B / 2B / 4B 三档的生效性
+
+### P4 · 后续排期（可接手）
+
+- [ ] **P4-A** `REVIEW.md` D4 评测基线：20 条工具调用用例（多步 / 需拒绝调用 / 参数缺失 / 诱导注入）
+      + 成功率 / 平均步数 / TTFT 表格——**P3-A、P3-D 与 C2 的收益都以它为前置**
+- [ ] **P4-B** C3 搜索工具重做（SearXNG 经 `dev-proxy` 同源转发，保留 Wikipedia 兜底）
+- [ ] **P4-C** C2 工具调用可靠性三件套（含"一次输出多个 `tool_call` 时顺序执行"，现状会静默丢弃）
+- [ ] **P4-D** 第 5 批多模态（B1 截图理解 / B2 语音 / B3 能力槽位可视化）
+- [ ] **P4-E** 批次 C 的 C1 WebMCP 适配器 + C1b 安全闸门
 
 ## 第 0 批 · 基础设施（已完成）
 
@@ -51,7 +108,7 @@
 
 ## 第 2 批 · 低风险高收益
 
-- [ ] **P1-4 新增 Qwen3.5-9B 档位（暂缓，优先级低于 REVIEW 的 A1/A5/A8）**
+- [ ] **P1-4 新增 Qwen3.5-9B 档位（暂缓，优先级低于批次 B/C 的能力项）**
   依据：9B 的 MLC 权重确实存在（`mlc-ai/Qwen3.5-9B-q4f16_1-MLC`，q4f16_1 的 VRAM **6433MB**、q4f32_1 为 7544MB），
   但**不在 SDK 的 `MODEL_PRESETS` 目录内**（该目录只有 0.8B / 2B / 4B），而 `getAvailableModelOptions()` 会过滤掉
   目录外的 id——**仅补 `MODEL_OPTIONS` 元数据不会让它出现在下拉里**。要做必须走自定义 ModelRecord 路线
@@ -75,7 +132,7 @@
 - [ ] **P0-4 存储占用显示 + 清理入口**
   接已就绪的 `getStorageEstimate()` / `getCacheStatus()` / `deleteModelArtifacts()`
   验收：点击清理后占用数值下降，且对话历史仍在；同时更新 `README.md` 的「存储」限制条目
-  注意：需先解决"权重存两份"问题（见 `REVIEW.md` A1），否则清理后占用不会归零
+  前置已解除：权重存两份的问题已由 A1 修复（模型缓存唯一在 SDK 侧），清理后占用会真实下降
 
 ## 第 4 批 · 检索增强
 
@@ -136,13 +193,11 @@
   当前 react 协议的 system prompt 只有 1 个示例（"现在几点"），而工具有 6 类（时间 / 计算 / 搜索 / 页面 / 记忆读写）
   代价：示例占用 `SYSTEM_PROMPT_BUDGET`（3200 字符），且 `native` / `json` 协议不走 `buildSystemPrompt`，
   因此**只对 react 协议生效**，是否值得需实测
-- [ ] **档位推荐结合工具调用能力（当前只按硬件，且实际未接线）**
+- [ ] **档位推荐结合工具调用能力（当前只按硬件）**
   依据：参数量不是工具调用能力的可靠指标（BFCLv3 厂商自测口径下，同为 ~1B 级可从 16.6 到 52.4）。
   可用的官方数据是 Qwen3.5 自己的自测分：**BFCL-V4 2B=43.6 / 0.8B=25.3；TAU2-Bench 2B=48.8 / 0.8B=11.6**（4B 未公布）
-  前置：`recommendModelId` 因只有 2B 带 `recommended: true` 而**永远返回 2B**，且主页面 `main.js` 没有消费
-  `model-recommended` 事件（下拉初始为 0.8B 且加载用下拉值），所以"按硬件推荐"目前是**空转**的
-  做法：先修 `REVIEW.md` 的 A5（接线 + 引入 `deviceMemoryGB` / `vramRequiredMB`），再谈是否把工具调用成功率
-  纳入权重；届时用本地评测基线取数（`REVIEW.md` D4），而不是引用厂商自测分
+  现状：A5 已完成接线与核数/显存判定，"按硬件推荐"不再是空转；但权重里仍**没有**工具调用能力这一维
+  做法：把工具调用成功率纳入权重前，先用本地评测基线取数（`REVIEW.md` D4），而不是引用厂商自测分
 - [ ] **`json` 模式的观感优化（是否要做取决于 P0-2 结论）**
   问题：约束解码下流式输出是 JSON 文本，"思考过程"里看不到自然语言
   思路：只在"工具决策步"用约束解码，最终回答改用自由文本生成（代价是多一次推理）
@@ -183,7 +238,9 @@
 - [x] npm 发布：**暂不做**（`package.json` 保持 `private: true`）
 - [ ] 默认工具协议：待第 1 批实测结论（当前 `auto → native`）
 - [x] 多模态体积：**接受**（方式二部署体积 6MB → 67MB，仅影响"无构建工具的宿主"这一种接入方式）→ 第 5 批可启动
-- [ ] 是否采纳 `REVIEW.md` 的批次 A 必修三项（A1 双重缓存 / A5 推荐接线 / A8 文档）——**待人工确认**
+- [x] 采纳 `REVIEW.md` 批次 A 的必修项（A1 双重缓存 / A4 显存门槛 / A5 推荐接线 / A8 文档 / A9 文案）：**已实施**
+  - A1 选方案①：SW 不再拦截模型路径，模型缓存唯一交给 SDK 的 IndexedDB（`VERSION` v2 → v3 以回收历史死副本）
+  - A4 定为 3.8GB（与 0.8B / 2B 同口径的向上取整）；A5 另引入 `recommendMinCores`（4B 需 12 核以上才自动推荐）
 
 ## 风险登记
 
@@ -191,8 +248,9 @@
 | --- | --- | --- |
 | `json` 约束解码在三档上是否生效未验证 | 决定协议默认值 | 第 1 批 P0-2c 实测；不生效则回退 `native`。旁证：WebLLM 依赖 `@mlc-ai/web-xgrammar`，机制真实存在，但**官方未文档化其 JSON Schema 子集边界**，需自测 |
 | native 协议 system prompt 变长（1067 → 2663 字符） | 长期记忆可能被裁到 400 字符 | 回退 `"react"`；或精简 `toolsJson`；或调 `SYSTEM_PROMPT_BUDGET`（会动既有预算单测）。**备选**：SDK 的 `LoadOptions.contextLength` 可把窗口从默认 4096 上调（上限 32768），比缩提示词更直接——但需先确认历史是否真的进了上下文（MLC 的 Qwen3.5 条目带 `max_history_size: 1`，语义待核实） |
-| **模型权重被存两份**（SW Cache + SDK IndexedDB），见 `REVIEW.md` A1 | 磁盘占用约翻倍；`deleteModelArtifacts()` 清不干净，与"清理后占用下降"的验收冲突 | 二选一：SW 不再拦截模型路径（推荐），或清理时一并删除 SW 缓存 |
-| **"设备自适应推荐"在主页面未接线**，见 `REVIEW.md` A5 | 用户实际加载的是最低档 0.8B（下拉初始值），而 0.8B 的 TAU2-Bench 仅 11.6（2B 为 48.8），直接表现为"这个 agent 很笨" | 在 `main.js` 消费 `model-recommended` 事件并写回下拉；顺带把 `deviceMemoryGB` / `vramRequiredMB` 纳入判定 |
+| ~~**模型权重被存两份**~~（已修复，见 `REVIEW.md` A1） | —— | 已实施：SW 不再拦截模型路径，模型缓存唯一交给 SDK 的 IndexedDB；`VERSION` v3 的 activate 阶段回收历史死副本 |
+| ~~**"设备自适应推荐"在主页面未接线**~~（已修复，见 `REVIEW.md` A5） | —— | 已实施：`main.js` 消费 `model-recommended` 事件写回下拉；推荐逻辑改为"核数门槛 + 推荐门槛 + 显存预算"后取最高档 |
+| A5 的档位映射未经真机验证（12 核门槛属工程判断，非实测结论） | 8 核 16GB 的机器不会被自动推 4B，需在页面手动选择 | A′ 测量阶段用真实设备核对；门槛集中在 `MODEL_OPTIONS.recommendMinCores` 一处，可随时调整 |
 | 无 WebGPU 设备完全不可用（覆盖率 **85.72%**，caniuse 2026-08；桌面 Safari 仅 partial、Firefox 157–159 仍默认关闭） | 约 14% 流量池无法使用 | 未排期；候选方案是 wllama（GGUF / wasm）等非 WebGPU 后端 |
 | 上游 function calling 长期停留 WIP（0.2.85 仍标 WIP，`functionCallingModelIds` 仅 7B/8B） | 无法依赖 `tools` / `tool_choice`，工具调用需自维护 | 已用三协议 + 约束解码规避；持续跟踪上游，落地后可减少自维护的解析路径 |
 | 第三方权重镜像的供应链风险 | 权重可能被篡改 | P2-3 的 SRI 校验（WebLLM 已原生支持 `integrity`）；README 已声明不重新分发权重 |

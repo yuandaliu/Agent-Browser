@@ -3,10 +3,10 @@
  *
  * 流程：
  *   1) 首次打开页面：SW 注册成功（sw.js 出现在 navigator.serviceWorker.controller）
- *   2) 触发应用 chunk / 模型路径下载：缓存命中
+ *   2) 触发应用 shell 加载，并主动 fetch 一次 /hf/* 路径
  *   3) 模拟离线（ctx.setOffline(true)）
  *   4) 刷新页面：应用壳仍能正常加载（HTML 来自缓存）
- *   5) 验证 Cache Storage 中确实有 local-agent-app-v1 / local-agent-models-v1
+ *   5) 验证 Cache Storage 中有 local-agent-app-*，且**没有** local-agent-models-*（REVIEW.md A1）
  *
  * 用法：先启动 proxy + dev，然后 npm run test:offline
  *   - BASE_URL=http://127.0.0.1:5189  npm run test:offline
@@ -53,8 +53,9 @@ async function main() {
     await page.waitForSelector("#load-btn", { timeout: 10000 });
     log("✅ 加载按钮可见，应用壳就绪");
 
-    // 主动 fetch 一个 /hf/* 路径，模拟模型权重请求（不必真实下载）
-    log("3) 主动 fetch /hf 路径让 SW 缓存…");
+    // 主动 fetch 一个 /hf/* 路径（不必真实下载）：v3 起 SW 不再拦截模型路径，
+    // 这里用于确认该请求不会被写进任何 Cache Storage 缓存。
+    log("3) 主动 fetch /hf 路径（应不被 SW 缓存）…");
     const fetchResult = await page.evaluate(async (baseUrl) => {
       try {
         const res = await fetch(`${baseUrl}/hf/__probe__/test.bin`, { method: "GET" });
@@ -68,16 +69,20 @@ async function main() {
     // 让 SW 有时间把响应写入缓存
     await new Promise((r) => setTimeout(r, 500));
 
-    // ---------- 4) 验证 Cache Storage 已有 local-agent-app-v1 ----------
+    // ---------- 4) 验证 Cache Storage 已有应用壳缓存（不硬编码版本号） ----------
     log("4) 检查 Cache Storage…");
     const cacheNames = await page.evaluate(async () => {
       return await caches.keys();
     });
     log(`   Cache Storage: [${cacheNames.join(", ")}]`);
-    if (!cacheNames.includes("local-agent-app-v1")) {
-      fail("未找到 local-agent-app-v1（应用壳缓存未建立）");
+    if (!cacheNames.some((n) => n.startsWith("local-agent-app-"))) {
+      fail(`未找到 local-agent-app-*（应用壳缓存未建立）：[${cacheNames.join(", ")}]`);
     } else {
       log("✅ 应用壳缓存已建立");
+    }
+    // 模型权重不应再由 SW 缓存（REVIEW.md A1：唯一交给 SDK 的 IndexedDB）
+    if (cacheNames.some((n) => n.startsWith("local-agent-models-"))) {
+      fail(`SW 仍在缓存模型权重（不应存在 local-agent-models-*）：[${cacheNames.join(", ")}]`);
     }
 
     // ---------- 5) 模拟离线，刷新页面 ----------

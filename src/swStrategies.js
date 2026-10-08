@@ -12,13 +12,22 @@
  * 守卫只能防"两文件漂移"，不能验证 SW 实际运行行为，改动 sw.js 后务必手动验证。
  *
  * 缓存策略矩阵：
- *   - 模型权重（/hf*, /hf-transformers*, /gh-raw*）   → cache-first（权重不变，命中即用）
+ *   - 模型权重（/hf*, /hf-transformers*, /gh-raw*）   → **不拦截**（模型缓存唯一交给 SDK）
  *   - 应用 chunks（/assets/*, /dist-embed/*）            → stale-while-revalidate
  *   - 导航请求（mode === "navigate"）                     → network-first with cache fallback
+ *
+ * 为什么模型权重不再由 SW 缓存（REVIEW.md A1）：
+ * SDK 自己按 cacheBackend（本项目用 indexeddb）把权重写进 IndexedDB，且**缓存命中后不再发起
+ * fetch**——本 SW 对同一批 URL 做的 cache-first 副本永远不会被读取，用户却永久多付一倍磁盘
+ * （2B 档 ~1.2GB → 多占 ~1.2GB），还让"清理缓存"的承诺失真（SDK 的 deleteModelArtifacts()
+ * 只清 IndexedDB 侧）。离线可用性不受影响：权重仍在 SDK 的 IndexedDB 里。
  */
 
 /**
- * 判断 URL 是否为模型权重请求（命中 cache-first 策略）
+ * 判断 URL 是否为模型权重请求。
+ *
+ * 注意：命中本函数意味着"**不拦截**"（放行给浏览器默认网络行为），而不是"走 cache-first"。
+ * 见文件头「为什么模型权重不再由 SW 缓存」。
  */
 export function isModelRequest(url) {
   if (!url || !url.pathname) return false;
@@ -43,35 +52,6 @@ export function isAppChunkRequest(url) {
     url.pathname === "/local-agent.esm.js" ||
     url.pathname.endsWith("/local-agent.esm.js")
   );
-}
-
-/**
- * Cache-first：命中即用，未命中走网络并缓存。
- * 适用：模型权重（不变的大文件）。
- *
- * 关键：fetch 拿到响应（不论 2xx/4xx/5xx）一律透传给调用方，不吞错，
- * 否则会在 DevTools 里掩盖 dev-proxy 的上游错误（如 502），只剩笼统的 503。
- * 仅在 fetch 直接 reject（真断网 / 网络层失败）且无缓存时才返回 503。
- *
- * @param {Request} req - 原始请求
- * @param {string} cacheName - Cache Storage 名称
- * @param {object} caches - Cache Storage 客户端（生产环境是全局 self.caches）
- * @param {function} fetchImpl - 可注入的 fetch（测试用，默认走全局 fetch）
- */
-export async function cacheFirst(req, cacheName, caches, fetchImpl = globalThis.fetch) {
-  const cache = await caches.open(cacheName);
-  const cached = await cache.match(req);
-  if (cached) return cached;
-  let res;
-  try {
-    res = await fetchImpl(req);
-  } catch {
-    // fetch 直接 reject（断网 / 网络层失败）且无缓存：返回 503，前端可降级
-    return new Response("offline and no cache", { status: 503 });
-  }
-  if (res && res.ok) cache.put(req, res.clone());
-  // 上游 4xx/5xx 透传，不入缓存也不吞错（DevTools 能直接看到 dev-proxy 的 502 body）
-  return res;
 }
 
 /**
@@ -123,11 +103,15 @@ export async function networkFirstWithCacheFallback(req, appCacheName, caches, f
 }
 
 /**
- * 路由决策：根据请求 URL 返回应该使用的策略函数名。
+ * 路由决策：根据请求 URL 返回应该使用的策略函数名；返回 null 表示"不拦截"。
  * 单元测试可验证决策正确性。
+ *
+ * `isModelRequest(url)` 分支返回 null 是**显式决策**（不是遗漏）：模型权重放行给浏览器
+ * 默认网络行为，缓存唯一交给 SDK 的 IndexedDB（REVIEW.md A1）。保留该分支是为了让
+ * "模型路径不参与任何 SW 缓存策略"这件事在代码里可见，也避免日后新增规则时误伤。
  */
 export function pickStrategy(url, mode) {
-  if (isModelRequest(url)) return "cacheFirst";
+  if (isModelRequest(url)) return null; // 显式放行：模型缓存唯一交给 SDK
   if (isAppChunkRequest(url)) return "staleWhileRevalidate";
   if (mode === "navigate") return "networkFirstWithCacheFallback";
   return null; // 不拦截

@@ -42,8 +42,16 @@ const stubEl = () => ({
   lastChild: null,
 });
 
+// getElementById 必须返回**同一实例**：main.js 的 handleModelEvent 会把推荐档写回下拉，
+// 测试需要按 id 取回同一个 stub 才能断言（若每次返回新对象，写入永远看不到）。
+const elById = new Map();
+const getEl = (id) => {
+  if (!elById.has(id)) elById.set(id, stubEl());
+  return elById.get(id);
+};
+
 const documentStub = {
-  getElementById: vi.fn(() => stubEl()),
+  getElementById: vi.fn((id) => getEl(id)),
   addEventListener: vi.fn(),
   createElement: vi.fn(() => stubEl()),
   createTextNode: vi.fn((text) => ({ textContent: text ?? "" })),
@@ -66,7 +74,7 @@ const mockModelOptions = [
   },
   {
     id: "Qwen3.5-4B-q4f16_1-MLC",
-    label: "Qwen3.5 4B（高质量，~2.4GB / 6GB 显存）",
+    label: "Qwen3.5 4B（高质量，~2.4GB / 3.8GB 显存）",
   },
 ];
 
@@ -93,7 +101,7 @@ vi.mock("../../src/embed.js", () => {
   };
 });
 
-const { shortModelName, friendlyModelName } = await import("../../src/main.js");
+const { shortModelName, friendlyModelName, handleModelEvent } = await import("../../src/main.js");
 
 describe("shortModelName — 纯函数", () => {
   it("无斜杠的 id → 原样返回", () => {
@@ -125,5 +133,32 @@ describe("friendlyModelName — 纯函数", () => {
 
   it("未知 id → 降级到 shortModelName（取最后一段）", () => {
     expect(friendlyModelName("unknown/model-id")).toBe("model-id");
+  });
+});
+
+describe("handleModelEvent — model-recommended 接线（REVIEW.md A5）", () => {
+  it("收到推荐事件 → 写回下拉并设置 title", () => {
+    const select = getEl("model-select");
+    select.value = "Qwen3.5-0.8B-q4f16_1-MLC"; // 页面初始值 = getDefaultModelId()（最低档）
+    handleModelEvent({
+      type: "model-recommended",
+      modelId: "Qwen3.5-2B-q4f16_1-MLC",
+      snapshot: { webgpuSupported: true },
+    });
+    // 修复前：该事件无人消费，下拉停留在最低档，而「加载模型」读的正是下拉值
+    expect(select.value).toBe("Qwen3.5-2B-q4f16_1-MLC");
+    expect(select.title).toMatch(/推荐/);
+  });
+
+  it("推荐 id 不在下拉选项中 → 不改动下拉（避免 select.value 被写成空串）", () => {
+    const select = getEl("model-select");
+    select.value = "Qwen3.5-2B-q4f16_1-MLC";
+    handleModelEvent({ type: "model-recommended", modelId: "unknown/model", snapshot: {} });
+    expect(select.value).toBe("Qwen3.5-2B-q4f16_1-MLC");
+  });
+
+  it("ready 事件仍按 modelId 更新徽章（接线不影响既有分支）", () => {
+    handleModelEvent({ type: "ready", modelId: "Qwen3.5-2B-q4f16_1-MLC" });
+    expect(getEl("model-badge").textContent).toContain("Qwen3.5 2B");
   });
 });

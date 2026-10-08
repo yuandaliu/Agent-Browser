@@ -148,13 +148,12 @@ describe("recommendModelId — 设备自适应推荐", () => {
     expect(id).toBe("Qwen3.5-2B-q4f16_1-MLC");
   });
 
-  it("WebGPU 支持 + 16 核 → 命中带 recommended 标记的档（与 8 核同源：Qwen3.5-2B）", () => {
-    // 当前推荐档在 high 档上（Qwen3.5-2B）；cores 越多仍优先走带 recommended 标记的档。
-    // 想要"高核=ultra 档"，需把 Qwen3.5-4B 也标 recommended，或改 recommendModelId 优先级。
+  it("WebGPU 支持 + 16 核 → ultra 档（4B）：高核设备不再与 4 核笔记本同档", () => {
+    // 修复前：只有 2B 标 recommended，循环在 high 档就命中返回 → 16 核 32GB 与 4 核同档。
+    // 现在按"核数门槛 + 推荐门槛 + 显存预算"过滤后取最高档（REVIEW.md A5）。
     setCores(16);
-    const id = recommendModelId({ webgpuSupported: true });
-    const opt = getModelOptions().find((m) => m.id === id);
-    expect(opt.recommended).toBe(true);
+    const id = recommendModelId({ webgpuSupported: true, deviceMemoryGB: 8 });
+    expect(id).toBe("Qwen3.5-4B-q4f16_1-MLC");
   });
 
   it("WebGPU 支持 + 4 核 → high 推荐档（Qwen3.5-2B）", () => {
@@ -198,6 +197,68 @@ describe("recommendModelId — 设备自适应推荐", () => {
     }
     const idNoGpu = recommendModelId({ webgpuSupported: false });
     expect(ids).toContain(idNoGpu);
+  });
+});
+
+describe("recommendModelId — 硬件快照矩阵（REVIEW.md A5 验收）", () => {
+  afterEach(() => {
+    restoreNavigator();
+  });
+
+  // 关键背景：Chrome 的 navigator.deviceMemory 上限被 clamp 到 8GB，因此 8 核 16GB 与
+  // 16 核 32GB 的内存信号相同——区分二者只能靠核数（recommendMinCores）。
+  const cases = [
+    { name: "无 WebGPU（8 核）", cores: 8, snapshot: { webgpuSupported: false }, tier: "low" },
+    { name: "2 核 4GB", cores: 2, snapshot: { webgpuSupported: true, deviceMemoryGB: 4 }, tier: "low" },
+    { name: "4 核 8GB", cores: 4, snapshot: { webgpuSupported: true, deviceMemoryGB: 8 }, tier: "high" },
+    {
+      name: "8 核 16GB（deviceMemoryGB 上报为 8）",
+      cores: 8,
+      snapshot: { webgpuSupported: true, deviceMemoryGB: 8 },
+      tier: "high",
+    },
+    {
+      name: "16 核 32GB（deviceMemoryGB 同样上报为 8）",
+      cores: 16,
+      snapshot: { webgpuSupported: true, deviceMemoryGB: 8 },
+      tier: "ultra",
+    },
+    {
+      name: "8 核但内存仅 2GB（显存预算不足 → 降档）",
+      cores: 8,
+      snapshot: { webgpuSupported: true, deviceMemoryGB: 2 },
+      tier: "low",
+    },
+    {
+      name: "8 核且无 deviceMemoryGB（Firefox / Safari → 跳过显存约束）",
+      cores: 8,
+      snapshot: { webgpuSupported: true },
+      tier: "high",
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} → ${c.tier} 档`, () => {
+      setCores(c.cores);
+      const id = recommendModelId(c.snapshot);
+      expect(getModelOptions().find((m) => m.id === id).tier).toBe(c.tier);
+    });
+  }
+
+  it("4B 档显存门槛与 SDK 权威值对齐（REVIEW.md A4，防再次漂移）", () => {
+    const opt = getModelOptions().find((m) => m.id === "Qwen3.5-4B-q4f16_1-MLC");
+    const preset = MODEL_PRESETS.find((p) => p.id === "Qwen3.5-4B-q4f16_1-MLC");
+    // 口径：元数据取 SDK vramRequiredMB 向上取整到 0.1GB（与 0.8B / 2B 的写法一致）
+    const sdkGB = preset.vramRequiredMB / 1024;
+    expect(opt.minVRAMGB).toBeGreaterThanOrEqual(sdkGB);
+    expect(opt.minVRAMGB - sdkGB).toBeLessThan(0.1);
+  });
+
+  it("所有档位的 minVRAMGB 都不小于 SDK 权威值（不会推荐显存不足的档）", () => {
+    for (const opt of getModelOptions()) {
+      const preset = MODEL_PRESETS.find((p) => p.id === opt.id);
+      expect(opt.minVRAMGB).toBeGreaterThanOrEqual(preset.vramRequiredMB / 1024);
+    }
   });
 });
 

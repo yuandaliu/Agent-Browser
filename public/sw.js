@@ -1,27 +1,33 @@
 /**
  * local-llm-agent Service Worker — 离线缓存
  *
- * 功能：缓存应用壳（HTML/CSS/JS chunks）+ 模型权重（/hf*、/hf-transformers*、/gh-raw*）
- *       让用户在首次加载完成后，断网 / 跨页面仍能秒开。
+ * 功能：缓存应用壳（HTML/CSS/JS chunks），让用户在首次加载完成后，断网 / 跨页面仍能秒开。
+ *       **不缓存模型权重**（原因见下）。
  *
  * 缓存策略：
- *   - 模型权重                                  → cache-first（权重不变）
+ *   - 模型权重（/hf*, /hf-transformers*, /gh-raw*） → **不拦截**（模型缓存唯一交给 SDK）
  *   - 应用 chunks（/assets/*, /dist-embed/*）    → stale-while-revalidate
  *   - 导航请求（HTML）                          → network-first + cache fallback
+ *
+ * 为什么模型权重不再由 SW 缓存（REVIEW.md A1）：
+ *   SDK 自己按 cacheBackend（本项目用 indexeddb）把权重写进 IndexedDB，且**缓存命中后不再
+ *   发起 fetch**——SW 写的副本永远不会被读取，用户却永久多付一倍磁盘（2B 档 ~1.2GB → 多占
+ *   ~1.2GB），还让"清理缓存"的承诺失真（SDK 的 deleteModelArtifacts() 只清 IndexedDB 侧）。
+ *   离线可用性不受影响：权重仍在 SDK 的 IndexedDB 里。
  *
  * 重要：本文件的策略函数与 src/swStrategies.js 人工同步维护（见 swStrategies.js 顶部注释）。
  *       SW 不支持 ESM import，所以这里 inline 复制——每次改一处必须改另一处。
  *       单测只覆盖 src/swStrategies.js；本文件因 SW 限制无法被单测直接覆盖，
- *       由 tests/unit/swSync.test.js 做签名与路径一致性守卫，改动后务必手动验证 SW 实际行为。
+ *       由 tests/unit/swSync.test.js 做签名、路径与"不得再缓存模型"的守卫，
+ *       改动后务必手动验证 SW 实际行为。
  *
  * 版本号：缓存**内容或策略**变化时递增 VERSION（activate 阶段会清理旧缓存）。
- *       仅修代码逻辑、不改变缓存内容时不必递增——否则会连带清掉模型权重缓存，
- *       迫使所有用户重新下载（1.2GB 级），代价极高。
- * cacheFirst 在 fetch 拿到 4xx/5xx 时透传上游响应，不替换为 503——否则会掩盖真实错误。
+ *       v3 的必要性：模型权重已移出 SW 缓存，递增后 activate 会删掉历史遗留的
+ *       local-agent-models-* 死副本，把用户被白占的磁盘收回来。因为那份副本本来就不会被
+ *       读取（SDK 的 IndexedDB 缓存独立存在），所以**不会触发任何重新下载**。
  */
 
-const VERSION = "v2";
-const MODEL_CACHE = `local-agent-models-${VERSION}`;
+const VERSION = "v3";
 const APP_CACHE = `local-agent-app-${VERSION}`;
 
 // 应用 shell（离线 fallback 预缓存）
@@ -31,6 +37,7 @@ const APP_SHELL = ["/", "/index.html", "/search.html"];
 // 策略函数（SYNC-MARKER: 与 src/swStrategies.js 同步）
 // ============================================================
 
+// 命中本函数意味着"不拦截"（放行给浏览器默认网络行为），不是"走 cache-first"。
 function isModelRequest(url) {
   if (!url || !url.pathname) return false;
   return (
@@ -48,22 +55,6 @@ function isAppChunkRequest(url) {
     url.pathname === "/local-agent.esm.js" ||
     url.pathname.endsWith("/local-agent.esm.js")
   );
-}
-
-async function cacheFirst(req, cacheName) {
-  const cache = await caches.open(cacheName);
-  const cached = await cache.match(req);
-  if (cached) return cached;
-  let res;
-  try {
-    res = await fetch(req);
-  } catch {
-    // 真正断网（fetch 直接 reject）：返回 503，前端可降级
-    return new Response("offline and no cache", { status: 503 });
-  }
-  if (res && res.ok) cache.put(req, res.clone());
-  // 上游 4xx/5xx：透传，不吞掉 dev-proxy 的错误信息（让 DevTools 直接看到真实 502）
-  return res;
 }
 
 async function staleWhileRevalidate(req, cacheName) {
@@ -113,12 +104,9 @@ self.addEventListener("activate", (event) => {
     (async () => {
       // 清理旧版本缓存
       const keys = await caches.keys();
-      const stale = keys.filter(
-        (k) =>
-          (k.startsWith("local-agent-models-") || k.startsWith("local-agent-app-")) &&
-          k !== MODEL_CACHE &&
-          k !== APP_CACHE,
-      );
+      // 只保留当前的 APP_CACHE：local-agent-models-* 是历史版本遗留的模型缓存死副本
+      // （v3 起 SW 不再写模型权重），必须一并删除才能把被白占的磁盘收回来。
+      const stale = keys.filter((k) => k.startsWith("local-agent-") && k !== APP_CACHE);
       await Promise.all(stale.map((k) => caches.delete(k)));
       await self.clients.claim();
     })()
@@ -137,10 +125,8 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   // 路由决策
-  if (isModelRequest(url)) {
-    event.respondWith(cacheFirst(req, MODEL_CACHE));
-    return;
-  }
+  // 模型权重：显式放行、不拦截——模型缓存唯一交给 SDK 的 IndexedDB（见文件头说明）。
+  if (isModelRequest(url)) return;
   if (isAppChunkRequest(url)) {
     event.respondWith(staleWhileRevalidate(req, APP_CACHE));
     return;

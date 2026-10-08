@@ -3,15 +3,14 @@
  *
  * 覆盖 src/swStrategies.js 的所有导出：
  *   - isModelRequest / isAppChunkRequest：URL 路由
- *   - pickStrategy：决策正确性
- *   - cacheFirst / staleWhileRevalidate / networkFirstWithCacheFallback：三种策略
+ *   - pickStrategy：决策正确性（含"模型权重显式放行、不走任何缓存策略"）
+ *   - staleWhileRevalidate / networkFirstWithCacheFallback：两种策略
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   isModelRequest,
   isAppChunkRequest,
   pickStrategy,
-  cacheFirst,
   staleWhileRevalidate,
   networkFirstWithCacheFallback,
 } from "../../src/swStrategies.js";
@@ -60,7 +59,6 @@ function mockFetchImpl(handler) {
 
 const req = (url) => ({ url, method: "GET" });
 const ok = (body = "ok") => new Response(body, { status: 200 });
-const bad = () => new Response("bad", { status: 500 });
 
 // ============================================================
 // URL 路由判断
@@ -109,8 +107,10 @@ describe("isAppChunkRequest — 应用 chunk URL 判定", () => {
 });
 
 describe("pickStrategy — 路由决策", () => {
-  it("模型权重 → cacheFirst", () => {
-    expect(pickStrategy(new URL("http://x/hf/x/y"), "cors")).toBe("cacheFirst");
+  it("模型权重 → null（显式放行：模型缓存唯一交给 SDK，不走任何 SW 策略）", () => {
+    expect(pickStrategy(new URL("http://x/hf/x/y"), "cors")).toBe(null);
+    expect(pickStrategy(new URL("http://x/hf-transformers/o/r/m.onnx"), "cors")).toBe(null);
+    expect(pickStrategy(new URL("http://x/gh-raw/o/r/main/w.wasm"), "cors")).toBe(null);
   });
   it("应用 chunks → staleWhileRevalidate", () => {
     expect(pickStrategy(new URL("http://x/assets/x.js"), "cors")).toBe("staleWhileRevalidate");
@@ -121,52 +121,6 @@ describe("pickStrategy — 路由决策", () => {
   });
   it("其他 → null（不拦截）", () => {
     expect(pickStrategy(new URL("http://x/api/chat"), "cors")).toBe(null);
-  });
-});
-
-// ============================================================
-// cacheFirst 策略
-// ============================================================
-
-describe("cacheFirst — 缓存优先", () => {
-  beforeEach(() => {
-    mockCaches.caches.clear();
-  });
-
-  it("缓存命中 → 直接返回缓存，不走网络", async () => {
-    const cache = await mockCaches.open(mockCacheName);
-    const cachedRes = ok("from cache");
-    await cache.put(req("http://x/hf/model"), cachedRes);
-    const fetchImpl = mockFetchImpl(() => ok("from network"));
-    const res = await cacheFirst(req("http://x/hf/model"), mockCacheName, mockCaches, fetchImpl);
-    expect(await res.text()).toBe("from cache");
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("缓存未命中 → 走网络，成功则写入缓存", async () => {
-    const fetchImpl = mockFetchImpl(() => ok("from network"));
-    const res = await cacheFirst(req("http://x/hf/model"), mockCacheName, mockCaches, fetchImpl);
-    expect(await res.text()).toBe("from network");
-    const cache = await mockCaches.open(mockCacheName);
-    const cached = await cache.match(req("http://x/hf/model"));
-    expect(cached).toBeDefined();
-    expect(await cached.text()).toBe("from network");
-  });
-
-  it("缓存未命中 + 网络失败 → 返回 503", async () => {
-    const fetchImpl = mockFetchImpl(() => {
-      throw new Error("network down");
-    });
-    const res = await cacheFirst(req("http://x/hf/model"), mockCacheName, mockCaches, fetchImpl);
-    expect(res.status).toBe(503);
-  });
-
-  it("缓存未命中 + 网络返回 5xx → 不写入缓存（避免缓存错误响应）", async () => {
-    const fetchImpl = mockFetchImpl(() => bad());
-    const res = await cacheFirst(req("http://x/hf/model"), mockCacheName, mockCaches, fetchImpl);
-    expect(res.status).toBe(500);
-    const cache = await mockCaches.open(mockCacheName);
-    expect(await cache.match(req("http://x/hf/model"))).toBeUndefined();
   });
 });
 

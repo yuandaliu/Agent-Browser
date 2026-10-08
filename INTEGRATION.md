@@ -60,10 +60,10 @@ src/failureLog.js      失败对话调试日志
 import { createLocalAgent } from "./embed.js";
 
 const agent = createLocalAgent({
-  // modelId 留空或传 "auto"（默认）：ready() 内部探测硬件（WebGPU + 核数），
+  // modelId 留空或传 "auto"（默认）：ready() 内部探测硬件（WebGPU / 核数 / 设备内存），
   // 通过 onEvent 的 "model-recommended" 事件 + status 文本告知推荐档位。
-  // ⚠️ 推荐结果不会自动生效：宿主需要自己消费该事件（例如把下拉切到 e.modelId），
-  //    否则 load() 会加载 options.modelId 或最低档（详见下方 modelId 选项与 REVIEW.md A5）。
+  // ⚠️ 该事件是"通知"：宿主若要把它体现在自己的档位下拉上，需自行消费（见下方 onEvent）。
+  //    不消费也不影响 load()——load() 不传参时用的就是 ready() 算出的推荐档。
   // modelId: "Qwen3.5-2B-q4f16_1-MLC",  // 也可显式指定，跳过探测
   onProgress: ({ progress, status }) => renderProgressBar(progress, status), // 0-1
   onReady: ({ modelId }) => enableChatUI(modelId),
@@ -71,7 +71,7 @@ const agent = createLocalAgent({
   onEvent: (e) => {
     if (e.type === "model-recommended") {
       console.log(`为你的设备推荐：${e.modelId}`);
-      modelSelect.value = e.modelId; // ← 宿主需自行接线，推荐档才会真正被使用
+      modelSelect.value = e.modelId; // ← 仅当宿主自建了档位下拉时才需要这行
     }
   },
 });
@@ -118,7 +118,7 @@ const { answer } = await agent.chat("现在几点", {
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `modelId` | `"auto"` | `"auto"` 时由 `ready()` 探测硬件算出推荐档（当前实现总是落在 Qwen3.5 2B，见 `REVIEW.md` A5）。**注意**：推荐值不会自动被 `load()` 使用——传了显式 id 用显式 id，`"auto"` 用推荐档，而主页面是显式传下拉值（初始为 0.8B）。同步 fallback（未探测前）为 Qwen3.5-0.8B |
+| `modelId` | `"auto"` | `"auto"` 时由 `ready()` 探测硬件（WebGPU / 核数 / 设备内存）算出推荐档（4 核以上 2B、12 核以上 4B，见 `README.md`「模型选择与设备自适应」）。**注意**：传了显式 id 就用显式 id；不传参的 `load()` 直接用推荐档，而主页面加载的是下拉当前值（已在 `ready()` 后写回推荐档）。同步 fallback（未探测前）为 Qwen3.5-0.8B |
 | `modelSource` | `"proxy"` | `"proxy"` 走同源路由下载；`"direct"` 直连 HuggingFace |
 | `proxyOrigin` | 本地 127.0.0.1 / 托管页面同源 | 本地强制 IPv4 loopback；远程部署用 `location.origin` |
 | `verifyProxy` | 本地 true / 托管 false | 是否探测代理健康 |
@@ -244,8 +244,9 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 ## 8. 首次加载体验
 
 - 首次 `load()` 需下载数百 MB 权重（0.8B 约 447MB、2B 约 1.2GB、4B 约 2.4GB，取决于所选档），**务必把进度回调渲染出来**；
-- 权重会写入**两处**存储：SDK 按 `cacheBackend` 写入 IndexedDB（`webllm/*`），SW 又会把同一批
-  `/hf*` 响应写入 Cache（`local-agent-models-v2`）——按域名隔离，二次加载秒级，但磁盘占用约为单份的两倍（见 `README.md` 已知问题）；
+- 权重只写入**一处**存储：SDK 按 `cacheBackend` 写入 IndexedDB（`webllm/*`），可按域名隔离、二次加载秒级。
+  自 `sw.js` 的 `v3` 起 SW **不再拦截模型路径**（早期版本会把同一批 `/hf*` 响应再写进 Cache，
+  导致磁盘占用翻倍，见 `README.md`「离线缓存」）；
 - 建议在 UI 上提示“首次加载较慢，之后秒开”，并显示当前占用（`agent.getStorageEstimate()`）。
 
 ## 9. Service Worker 行为（宿主须知）
@@ -265,9 +266,8 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
   （多数浏览器默认允许）；跨域嵌入需把 `public/sw.js` 上传到宿主站点根路径并配置 `swPath`。
 - **想禁用 SW**：传 `serviceWorker: false`（推荐用于嵌入宿主站点，避免与宿主自有 SW 抢占 scope），
   或调用 `navigator.serviceWorker.getRegistrations()` 后 `unregister()`。
-- **清除缓存**：宿主可提供按钮清理磁盘空间——注意**模型产物可能同时存在于两处**（SDK 的 IndexedDB +
-  SW 的 `local-agent-models-v2`），`agent.deleteModelArtifacts()` 只清前者，详见 `README.md`「离线缓存」
-  的已知问题与 `REVIEW.md` 的 A1。
+- **清除缓存**：宿主可提供按钮清理磁盘空间——`agent.deleteModelArtifacts()` 清理 SDK 侧的模型产物
+  （不传参清空全部），清理后占用会真实下降；SW 侧只缓存应用壳，详见 `README.md`「离线缓存」。
 
 ## 10. 与宿主页面共存要点
 
@@ -287,7 +287,8 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 - [ ] 「加载模型」进度条 0→100%，二次打开走缓存秒开
 - [ ] 对话流式输出正常，思考过程（Action / Observation）可见
 - [ ] 首次加载提示已呈现（2B 档约 1.2GB，请耐心等待）
-- [ ] 模型档位切换符合预期（`"auto"` 只影响 `ready()` 的推荐计算，**不会自动切换下拉**，见 A5）
+- [ ] 模型档位切换符合预期（`"auto"` 下 `ready()` 会把推荐档写回主页面下拉；宿主自建下拉需自行消费
+      `model-recommended` 事件）
 - [ ] 不支持 WebGPU 的浏览器有降级提示（`onError` 分支）
 - [ ] 嵌入场景已设置 `serviceWorker: false`（或正确配置 `swPath` / `swScope`）以免抢占宿主 SW
 - [ ] 已处理与宿主页面的样式冲突（浮窗类名加前缀或 Shadow DOM）

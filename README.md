@@ -4,8 +4,7 @@
 （WebGPU / WebLLM）加载 0.8B–4B 级开源模型，实现**工具调用循环**（ReAct 文本 / Qwen 原生 XML / 约束解码三种协议可选）、
 **工具系统**（时间 / 计算 / 搜索 / 页面读取 / 记忆）与 **IndexedDB 持久化记忆**，并提供流式输出的聊天界面。
 
-对话不上传服务器；模型权重下载一次后由浏览器缓存，之后离线可用（权重同时存在于 SDK 的 IndexedDB 缓存与
-Service Worker 的 Cache 中，见「离线缓存」的已知问题）。
+对话不上传服务器；模型权重下载一次后由浏览器缓存（SDK 的 IndexedDB，**单一副本**），之后离线可用。
 
 ## 文档索引
 
@@ -52,14 +51,10 @@ npm run dev
 页面操作：点击「加载模型」→ 首次下载**下拉中所选档**的权重（0.8B 约 447MB / 2B 约 1.2GB / 4B 约 2.4GB），
 之后走浏览器缓存秒开 → 控制台输出 `✅ 模型已就绪`、进度条 100% → 开始对话。
 
-> **注意（已知问题，仅限主页面）**：主页面的下拉初始值是**最低档 0.8B**，而「加载模型」加载的正是下拉当前项——
-> `ready()` 算出的推荐档没有被写回下拉（推荐结果只通过 `onEvent({type:"model-recommended"})` 与一处隐藏区域的
-> status 文本给出，而 `src/main.js` 未消费该事件）。因此**在主页面上首次使用实际加载的是 0.8B 而非推荐档 2B**，
-> 与"设备自适应"的宣称不符。
->
-> 同一份代码在另外两个页面里行为是**正确**的：`demo/embed-demo.html` 消费了 `model-recommended` 并自动切换下拉
-> （可直接照抄的实现），`search.html` 调 `agent.load()` 不传参因而走推荐档。想用 2B/4B 请在点「加载模型」前手动选择；
-> 缺陷详情与修复方案见 `REVIEW.md` 的 A5。
+> **设备自适应已接线**：下拉初始值是最低档占位，`ready()` 探测硬件后通过 `model-recommended` 事件把推荐档
+> 写回下拉（`src/main.js` 的 `handleModelEvent`），所以点「加载模型」用的就是推荐档。想用更高档位请在点击前
+> 手动选择；`search.html`（调 `agent.load()` 走推荐档）与 `demo/embed-demo.html`（同样消费该事件）行为一致。
+> 推荐逻辑与档位映射见下文「模型选择与设备自适应」。
 
 ## 嵌入已有页面
 
@@ -138,32 +133,33 @@ E2E（Playwright + 系统 Chrome + WebGPU）覆盖全部阶段验收点：进度
 
 | 资源类型 | 缓存策略 | 缓存名 | 原因 |
 | --- | --- | --- | --- |
-| 模型权重 `/hf/*` `/hf-transformers/*` `/gh-raw/*` | cache-first | `local-agent-models-v2` | 权重不变，命中即用 |
-| 应用 chunks `/assets/*` `/dist-embed/*` `local-agent.esm.js` | stale-while-revalidate | `local-agent-app-v2` | vite hash 文件名更新时自动切到新版 |
-| 导航请求（HTML） | network-first + cache fallback | `local-agent-app-v2` | 避免 stale SW 卡住；离线时降级到 `/index.html` |
+| 模型权重 `/hf/*` `/hf-transformers/*` `/gh-raw/*` | **不拦截** | — | 缓存唯一交给 SDK 的 IndexedDB，避免同一份权重存两份（见下） |
+| 应用 chunks `/assets/*` `/dist-embed/*` `local-agent.esm.js` | stale-while-revalidate | `local-agent-app-v3` | vite hash 文件名更新时自动切到新版 |
+| 导航请求（HTML） | network-first + cache fallback | `local-agent-app-v3` | 避免 stale SW 卡住；离线时降级到 `/index.html` |
 | 跨域请求 | 不拦截 | — | 让浏览器原生处理 |
 
 **效果**：应用壳（HTML / CSS / JS chunks）断网、跨页面仍能秒开。
 
-> **已知问题：模型权重会被存两份。** SDK 自身按 `cacheBackend`（本项目用 `indexeddb`）把权重缓存到
-> `webllm/model` / `webllm/config` / `webllm/wasm`，而本 SW 又对 `/hf*`、`/hf-transformers/*`、`/gh-raw/*`
-> 做 cache-first，把同一批文件再写进 `local-agent-models-v2`：磁盘占用约翻倍；且 SDK 缓存命中后不再发起
-> fetch，SW 那份实际不会被读取。**副作用**：`agent.deleteModelArtifacts()` 只清理 SDK 侧，清理后占用不会归零。
-> 处置方案见 `REVIEW.md` 的 A1（二选一：SW 不再拦截模型路径，或清理时一并删除 SW 缓存）。
+> **为什么模型权重不由 SW 缓存**：SDK 自身按 `cacheBackend`（本项目用 `indexeddb`）把权重缓存到
+> `webllm/model` / `webllm/config` / `webllm/wasm`，且**缓存命中后不再发起 fetch**——SW 若再做一层
+> cache-first，那份副本永远不会被读取，只会让磁盘占用翻倍（2B 档 ~1.2GB → 多占 ~1.2GB），并让
+> `deleteModelArtifacts()` 的"清理"承诺失真。自 `sw.js` 的 `v3` 起模型路径不再被拦截：模型缓存唯一在
+> SDK 侧，离线可用性不变（权重仍在 IndexedDB 里）。升级到 v3 时 activate 阶段会一并删除历史遗留的
+> `local-agent-models-*` 缓存——那份副本本来就是死数据，因此**不会触发任何重新下载**。
 
-**清除缓存**（彻底清理需两处都做）：
+**清除缓存**：
 
 - SDK 侧：`agent.deleteModelArtifacts()`（不传参清空全部模型产物），或 DevTools → Application → IndexedDB；
-- SW 侧：`caches.delete("local-agent-models-v2")`，或 DevTools → Application → Storage → Clear site data。
+- SW 侧只缓存应用壳；DevTools → Application → Storage → Clear site data 可整体重置。
 升级缓存策略时 `public/sw.js` 会递增 `VERSION`，activate 阶段自动清理旧缓存。
 
 **存储管理 API**（宿主可自行接 UI，例如"模型占用 1.2GB · 清理"按钮）：`agent.getStorageEstimate()`
 查询源站占用 / 配额估算，`agent.getCacheStatus(modelId?)` 查询某档缓存状态，
 `agent.deleteModelArtifacts(modelId?)` 删除模型缓存（不传参则清空全部；只动模型产物，不影响 IndexedDB 对话历史）。
 
-> 注意：`getStorageEstimate()` 返回的是**整个源站**的占用（含 SW 缓存与对话历史），而
-> `deleteModelArtifacts()` **只清理 SDK 侧的模型产物**。在 SW 仍拦截模型路径的情况下，清理后占用不会归零
-> （原因见上文「离线缓存」的已知问题）。
+> 注意：`getStorageEstimate()` 返回的是**整个源站**的占用（含应用壳缓存与对话历史），而
+> `deleteModelArtifacts()` 只清理模型产物。由于模型缓存现在唯一存在于 SDK 侧，清理后占用会真实下降
+> （从旧版本升级上来的用户，SW 里历史遗留的那份模型副本会在 SW activate 时被自动删除）。
 
 **生产环境要求**：HTTPS（localhost 除外）。iframe 嵌入场景 SW 注册可能被宿主页面限制，详见 `INTEGRATION.md`。
 
@@ -185,34 +181,35 @@ E2E（Playwright + 系统 Chrome + WebGPU）覆盖全部阶段验收点：进度
 ## 模型选择与设备自适应
 
 页面左侧下拉可选 **3 个模型档位**（均为国内开源，仅阿里 Qwen3.5 系列）。默认 `modelId: "auto"`——`ready()`
-会探测硬件（WebGPU + 处理器核心数）并**算出**推荐档位，通过 `onEvent` 的 `model-recommended` 事件与 status
-文本给出；下拉不会自动切换（原因见下），也可手动覆盖。
+会探测硬件（WebGPU / 处理器核心数 / 设备内存）并算出推荐档位，通过 `onEvent` 的 `model-recommended` 事件
+写回下拉（主页面与 `demo/embed-demo.html` 均已接线），也可手动覆盖。
 
-| 模型 ID | 档位 | 下载 / 显存 | 适用设备 | 推荐 |
+| 模型 ID | 档位 | 下载 / 显存 | 适用设备 | 自动推荐条件 |
 | --- | --- | --- | --- | --- |
-| `Qwen3.5-0.8B-q4f16_1-MLC` | low | ~447MB / 1.6GB | 低端 / 最低显存兜底（**工具调用能力有限**，见下） | — |
-| `Qwen3.5-2B-q4f16_1-MLC` | **high** | ~1.2GB / 2.2GB | 主流 PC（4+ 核） | 自动推荐 |
-| `Qwen3.5-4B-q4f16_1-MLC` | ultra | ~2.4GB / **3.9GB** | 高端 PC（8+ 核） | — |
+| `Qwen3.5-0.8B-q4f16_1-MLC` | low | ~447MB / 1.6GB | 低端 / 最低显存兜底（**工具调用能力有限**，见下） | 兜底档（任何设备可用） |
+| `Qwen3.5-2B-q4f16_1-MLC` | **high** | ~1.2GB / 2.2GB | 主流 PC | 4 核以上 |
+| `Qwen3.5-4B-q4f16_1-MLC` | ultra | ~2.4GB / **3.8GB** | 高端 PC | 12 核以上且显存预算充足 |
 
-> 显存数值取自 SDK 的 `MODEL_PRESETS.vramRequiredMB`（0.8B 1629 / 2B 2245 / 4B 3868 MB，q4f16_1）。
-> 注意该字段**目前不参与推荐判定**（见下），只影响下拉文案。
+> 显存数值取自 SDK 的 `MODEL_PRESETS.vramRequiredMB`（0.8B 1629 / 2B 2245 / 4B 3868 MB，q4f16_1）；
+> `MODEL_OPTIONS` 按"向上取整到 0.1GB"记为 1.6 / 2.2 / 3.8GB，并由单测锁定与 SDK 权威值的一致性。
 >
 > **0.8B 档的能力边界（官方自测数据）**：BFCL-V4 工具调用 25.3 分（2B 为 43.6），多轮 agent 任务
 > TAU2-Bench 11.6 分（2B 为 48.8）。也就是说 **0.8B 适合纯对话/抽取，不适合承担工具调用**——
 > 若在你的设备上 agent 表现明显变差，先确认当前档位而不是怀疑循环实现。
 
-自适应逻辑（`src/modelLoader.js` 的 `recommendModelId(snapshot)`）：
+自适应逻辑（`src/modelLoader.js` 的 `recommendModelId(snapshot)`）——逐档过滤后取**最高**档：
 
-- 不支持 WebGPU → 最低档（low）
-- 2 核以下 → low
-- 4 核及以上 → 按 tier 优先级 ultra → high → low 查找，**优先返回带 `recommended: true` 的档**
+1. 不支持 WebGPU → 最低档；
+2. 候选档需同时满足：`核数 ≥ minCores`（能跑得起来）、`核数 ≥ recommendMinCores`（值得自动推荐）、
+   显存预算 ≥ `minVRAMGB`；
+3. 显存预算 = `snapshot.deviceMemoryGB × 0.6`（该字段只有 Chromium 系提供，且被 clamp 到 8GB；
+   Firefox / Safari 无此信号时跳过该约束）；
+4. 全部不满足 → 最低档兜底。
 
-> **实现与宣称的差距（已知问题）**：因为目前只有 2B 标了 `recommended: true`，上面的循环在 `high`
-> 档就会命中返回——**`ultra` 档永远不会被自动推荐**，8 核 / 32GB 的机器与 4 核笔记本拿到同一个档位。
-> 推荐逻辑也**没有使用** SDK 已提供的 `deviceMemoryGB` / `limits` / `vramRequiredMB`。修复方案见
-> `REVIEW.md` 的 A5（A4 的显存修正需与 A5 同做才会生效）。
->
-> 临时绕过：在页面下拉里手动选择 4B 档，或 `createLocalAgent({ modelId: "Qwen3.5-4B-q4f16_1-MLC" })`。
+> **为什么 4B 要 12 核以上才自动推荐**：`navigator.deviceMemory` 被 clamp 到 8GB，因此 8 核 16GB 与
+> 16 核 32GB 的内存信号**完全相同**，区分二者只能靠核数。4B 的"能跑"门槛（`minCores`）仍是 8 核，
+> 8 核机器可手动选择；自动推荐收紧到 12 核，避免轻薄本被推 2.4GB 下载后跑不动。
+> 想调整这个取舍，直接改 `MODEL_OPTIONS` 里的 `recommendMinCores` 即可。
 
 **手动覆盖**：`createLocalAgent({ modelId: "Qwen3.5-4B-q4f16_1-MLC" })`。
 
@@ -272,6 +269,7 @@ rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 
 
 ```
 ├── index.html / search.html / vite.config.js / vite.embed.config.js / package.json
+├── .nvmrc          # Node 版本（22）；package.json 的 engines 为 ^20.19.0 || >=22.12.0
 ├── README.md / USAGE.md / INTEGRATION.md / ROADMAP.md / REVIEW.md / LICENSE
 ├── src/            # 应用源码（14 个文件：12 个 JS + 2 个 CSS，见上方架构）
 ├── server/         # 本地模型代理服务器（dev-proxy.mjs）
@@ -294,7 +292,8 @@ rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 
   已支持；**桌面 Safari 仍为部分支持（partial）、Firefox 157–159 仍默认关闭**。剩余约 14% 的流量池无法使用本项目，
   这一取舍是明确的（未排期；候选方案是 wllama 等 GGUF/wasm 后端）。
 - **运行环境**：Node.js **≥ 20.19（或 ≥ 22.12）**——这是 Vite 7 的要求，低于该版本 `npm run dev` / `npm test`
-  会直接报错（`node:fs/promises` 无 `constants` 导出）。`package.json` 目前未声明 `engines`，属已知缺口。
+  会直接报错（`node:fs/promises` 无 `constants` 导出）。`package.json` 已声明 `engines`（`^20.19.0 || >=22.12.0`）
+  并附 `.nvmrc`（22），版本不符时安装阶段即会给出明确提示。
 - **模型能力**：小模型对工具调用的格式遵循存在不确定性，解析器已做多格式容错 + 死循环保护，但仍偶有答非所问；
   换更大的模型（2B/4B）可明显提升稳定性。当前只能胜任时间、计算、搜索这类简单任务。
 - **搜索工具**：当前用的是 DuckDuckGo **Instant Answer** 接口（返回摘要与相关主题，不是完整网页搜索，结果可能为空），
