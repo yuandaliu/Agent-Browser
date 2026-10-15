@@ -28,7 +28,11 @@
  */
 
 const VERSION = "v3";
-const APP_CACHE = `local-agent-app-${VERSION}`;
+const APP_CACHE_PREFIX = "local-agent-app-";
+const APP_CACHE = `${APP_CACHE_PREFIX}${VERSION}`;
+// v3 起 SW 不再写模型权重（模型缓存唯一交给 SDK 的 IndexedDB），但历史版本遗留的
+// local-agent-models-* 死副本仍占用户磁盘，需要由 activate 回收
+const LEGACY_MODELS_PREFIX = "local-agent-models-";
 
 // 应用 shell（离线 fallback 预缓存）
 const APP_SHELL = ["/", "/index.html", "/search.html"];
@@ -102,11 +106,17 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
-      // 清理旧版本缓存
+      // 清理旧版本缓存：只保留当前的 APP_CACHE。
+      // 清理范围**显式列举**，刻意不用 "local-agent-" 通配——通配会把将来新增的缓存命名空间
+      // （如 local-agent-images-v3）一并误删，且症状隐蔽（只在用户端表现为"缓存莫名不生效"）。
+      //   - local-agent-app-*    旧版本应用壳
+      //   - local-agent-models-* v3 之前遗留的模型缓存死副本（v3 起 SW 不再写模型权重）
       const keys = await caches.keys();
-      // 只保留当前的 APP_CACHE：local-agent-models-* 是历史版本遗留的模型缓存死副本
-      // （v3 起 SW 不再写模型权重），必须一并删除才能把被白占的磁盘收回来。
-      const stale = keys.filter((k) => k.startsWith("local-agent-") && k !== APP_CACHE);
+      const stale = keys.filter(
+        (k) =>
+          (k.startsWith(APP_CACHE_PREFIX) || k.startsWith(LEGACY_MODELS_PREFIX)) &&
+          k !== APP_CACHE,
+      );
       await Promise.all(stale.map((k) => caches.delete(k)));
       await self.clients.claim();
     })()

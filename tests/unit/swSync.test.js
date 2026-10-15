@@ -57,12 +57,18 @@ describe("public/sw.js 与 src/swStrategies.js 一致性守卫", () => {
   });
 
   it("模型缓存已移出 SW，且 VERSION 已递增到 v3+（否则历史死副本不会被回收）", () => {
-    // v3 起 SW 不再写 local-agent-models-*，但旧版本留下的副本仍占用户磁盘（2B 档 ~1.2GB），
-    // 必须靠 activate 的 "local-agent-" 前缀清理 + 版本递增才能收回来。
-    expect(swSrc).not.toMatch(/MODEL_CACHE/);
-    expect(swSrc).toMatch(/k\.startsWith\("local-agent-"\)/);
+    // v3 起 SW 不再写模型权重：不得存在用当前 VERSION 构造的模型缓存名。
+    // 历史版本遗留的 local-agent-models-* 仍需由 activate 回收（见下一条）。
+    expect(swSrc).not.toMatch(/local-agent-models-\$\{VERSION\}/);
     const versionMatch = swSrc.match(/const VERSION\s*=\s*"v(\d+)"/);
     expect(versionMatch).not.toBeNull();
     expect(Number(versionMatch[1])).toBeGreaterThanOrEqual(3);
+  });
+
+  it("activate 的清理范围必须显式列举（不得用 local-agent- 通配，否则会误删将来新增的缓存）", () => {
+    // 回归防护：曾经的写法是 k.startsWith("local-agent-")，会把任何新命名空间一并删掉。
+    expect(swSrc).not.toMatch(/startsWith\("local-agent-"\)/);
+    expect(swSrc).toMatch(/APP_CACHE_PREFIX/);
+    expect(swSrc).toMatch(/LEGACY_MODELS_PREFIX/);
   });
 });

@@ -92,6 +92,14 @@ export function handleModelEvent(event) {
       // 硬件推荐档 → 写回下拉（与 demo/embed-demo.html 的既有实现一致）。
       // 该事件在 "auto" 档位下由 ready() 触发一次，此后不再触发，所以直接覆盖即可，
       // 不需要"用户手动改过就不再覆盖"的标志位——事件到达时用户还没机会改。
+      //
+      // ⚠️ 时序契约：本分支依赖"下拉选项已经渲染完毕"（本文件末的 `await agent.ready()` 在
+      //    第 56-62 行的下拉填充之后才执行）。若将来把 ready() 提前、或让 chatWidget 之类
+      //    的组件去调 agent.ready()，`select.value = ...` 会因为 DOM 中尚无对应 <option>
+      //    而被静默写成空串——「加载模型」随后落到 FALLBACK_MODEL_ID（又是 0.8B），
+      //    症状是"设备自适应莫名其妙又失效了"，但代码看起来没问题。
+      //    下面这层 getModelOptions() 校验只挡"id 不在档位表"，挡不住"option 尚未渲染"。
+      //
       // 修复前：推荐结果只发事件而无人消费，而「加载模型」读的正是下拉当前值（初始为最低档
       // 0.8B），于是"设备自适应"形同虚设（REVIEW.md A5）。
       const recommended = getModelOptions().find((m) => m.id === event.modelId);

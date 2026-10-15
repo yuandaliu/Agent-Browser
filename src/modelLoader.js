@@ -68,6 +68,10 @@ const MODEL_OPTIONS = [
 const FALLBACK_MODEL_ID =
   MODEL_OPTIONS.find((m) => m.tier === "low")?.id ?? MODEL_OPTIONS[0]?.id ?? "";
 
+// 显存预算占系统内存的比例（保守：浏览器 / 系统 / 其他标签页也要占内存）。
+// 与 MODEL_OPTIONS 放在一起，调整档位门槛时能一眼看到这个系数。
+const VRAM_BUDGET_RATIO = 0.6;
+
 /**
  * 获取全部模型选项（含元数据）。
  * 返回浅拷贝防止外部 mutation 污染内部常量。
@@ -136,9 +140,6 @@ export function recommendModelId(snapshot) {
     })[0];
   return best.id;
 }
-
-/** 显存预算占系统内存的比例（保守：浏览器/系统/其他标签页也要占内存） */
-const VRAM_BUDGET_RATIO = 0.6;
 
 /**
  * 由 hardware snapshot 估算可用显存预算（MB）。

@@ -164,7 +164,7 @@ npm run build:embed        # 产出 dist-embed/
 > - 入口 `local-agent.esm.js` 约 157KB（gzip 42KB）；
 > - WebLLM 引擎 chunk 约 6.0MB（gzip 2.1MB），首次 `load()` 时按需下载；
 > - Transformers.js 后端 chunk 约 60.9MB（gzip 16.9MB），仅在选用 ONNX 模型时加载；
-> - SW 脚本 `sw.js` 约 5KB。
+> - SW 脚本 `sw.js` 约 5.6KB（5755 字节；v3 起不再缓存模型权重，只缓存应用壳）。
 >
 > 方式二默认需把**整个 `dist-embed/` 目录**（实测合计约 67MB）上传到宿主同源路径，请确认静态托管的单文件体积与总容量允许。
 > 两个 chunk 都是运行时动态 `import()`，入口不含 `modulepreload`，不影响页面首屏。
