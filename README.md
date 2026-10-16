@@ -276,6 +276,7 @@ rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 
 ├── public/         # 离线缓存 Service Worker（sw.js）
 ├── demo/           # 嵌入示例（embed-demo.html）
 ├── tests/          # 单元测试（tests/unit，21 个文件）+ E2E 验收脚本
+├── tools/          # 本机运维脚本（git-push.ps1 / .cmd：自适应选路推送，用法的见其头部注释）
 ├── research/       # 市场与技术调研底稿（REVIEW.md 的来源，含未核验条目清单）
 ├── vercel.json     # Vercel 部署配置（rewrites → 镜像）
 └── netlify.toml    # Netlify 部署配置（redirects → 镜像）
