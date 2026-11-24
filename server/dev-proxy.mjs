@@ -19,19 +19,34 @@
  *
  * 环境变量：
  *   PROXY_PORT       监听端口（默认 8787）
- *   PROXY_TOKEN      设置后所有请求必须带 X-Proxy-Token 头或 ?token= 参数
+ *   PROXY_HOST       监听地址（默认 127.0.0.1，仅本机可访问；跨机器调试才设 0.0.0.0）
+ *   PROXY_TOKEN      设置后所有请求必须带 X-Proxy-Token 头或 ?token= 参数（?token= 已废弃）
+ *   PROXY_CORS_ORIGINS  CORS 白名单（逗号分隔；"*" 表示放开，需配合 PROXY_TOKEN）
+ *   PROXY_ALLOW_REDIRECTS  设为 0 时拒绝一切 3xx 跟随（默认开启，但目标必须命中镜像白名单）
  *   GH_RAW_UPSTREAMS 自定义 gh-raw 上游列表（空格分隔），覆盖默认 [jsdelivr, jsdmirror, ghproxy]
  *   HF_UPSTREAMS     自定义 hf 上游列表（空格分隔），覆盖默认 [hf-mirror.com, hf-api.cn]
  */
+import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.argv[2] ?? process.env.PROXY_PORT ?? 8787);
+// 只监听回环地址：默认无鉴权时，代理绝不能暴露到局域网/公网。
+// 需要跨机器调试时显式设 PROXY_HOST=0.0.0.0，并务必同时设置 PROXY_TOKEN。
+const PROXY_HOST = process.env.PROXY_HOST ?? "127.0.0.1";
 const WORKER_HEADER = "browserai-proxy/dev";
 // 公网部署安全：设置 PROXY_TOKEN 环境变量后，所有请求需携带 X-Proxy-Token 头或 ?token= 参数。
-// 未设置时（本地开发）放行所有来源。
+// 未设置时（本地开发）放行所有来源——但此时服务只监听回环地址（见 PROXY_HOST）。
 const PROXY_TOKEN = process.env.PROXY_TOKEN ?? "";
+// CORS：默认只回显"本地 origin"（vite dev 是同源代理，不经过 CORS）。
+// 跨源嵌入场景可显式放开：
+//   PROXY_CORS_ORIGINS=*                 放开所有来源（请配合 PROXY_TOKEN 共用）
+//   PROXY_CORS_ORIGINS=https://a,https://b   逗号分隔白名单
+const PROXY_CORS_ORIGINS = (process.env.PROXY_CORS_ORIGINS ?? "").trim();
+// 3xx 跟随开关：默认开启，但目标必须命中镜像白名单且为 https（见 isAllowedRedirect）。
+// 设为 0 时直接拒绝重定向（返回 502），用于排查可疑跳转（**仅调试用**，正常开发保持默认即可）。
+const PROXY_ALLOW_REDIRECTS = process.env.PROXY_ALLOW_REDIRECTS !== "0";
 
 // ---------- gh-raw 多上游 fallback ----------
 // 顺序尝试：cdn.jsdelivr.net → cdn.jsdmirror.com → mirror.ghproxy.com
@@ -62,18 +77,142 @@ function getHfUpstreams() {
   return DEFAULT_HF_UPSTREAMS;
 }
 
+/** 本地来源主机名（Vite dev / 本机部署，含 IPv6 回环） */
+const LOCAL_ORIGIN_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function isLocalOrigin(origin) {
+  if (!origin) return false;
+  try {
+    return LOCAL_ORIGIN_HOSTS.has(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** sha256 等长化：让 timingSafeEqual 不因长度差异抛错或泄露长度 */
+function sha256(value) {
+  return crypto.createHash("sha256").update(String(value), "utf8").digest();
+}
+
+/**
+ * 恒定时间比较访问令牌。
+ * - 未配置 PROXY_TOKEN（本地开发）→ 直接放行
+ * - 否则对 header 与 query 两种来源都比一遍，不短路，避免"命中即返回"的时序差异
+ *
+ * 导出供单测：expectedToken 可注入，避免测试依赖进程环境变量。
+ */
+export function verifyToken(headerToken, queryToken, expectedToken = PROXY_TOKEN) {
+  if (!expectedToken) return true;
+  const expected = sha256(expectedToken);
+  const candidates = [headerToken, queryToken].filter(
+    (t) => typeof t === "string" && t.length > 0,
+  );
+  let ok = false;
+  for (const candidate of candidates) {
+    if (crypto.timingSafeEqual(sha256(candidate), expected)) ok = true;
+  }
+  return ok;
+}
+
+let warnedQueryToken = false;
+
 function checkAccess(req, reqUrl) {
-  if (!PROXY_TOKEN) return true; // 开发模式：未配置 token 即放行
+  if (!PROXY_TOKEN) return true; // 开发模式：未配置 token 即放行（且只监听回环）
   const headerToken = req.headers["x-proxy-token"] ?? "";
   const queryToken = reqUrl.searchParams.get("token") ?? "";
-  return headerToken === PROXY_TOKEN || queryToken === PROXY_TOKEN;
+  if (queryToken && !warnedQueryToken) {
+    warnedQueryToken = true;
+    console.warn(
+      "[dev-proxy] 通过 ?token= 传递令牌已废弃：会进入浏览器历史/中间层日志，请改用 X-Proxy-Token 头",
+    );
+  }
+  return verifyToken(headerToken, queryToken);
+}
+
+/**
+ * 计算响应应回的 Access-Control-Allow-Origin。
+ * 返回 null 表示"不设置该头"——跨源读取会被浏览器默认拒绝，这是默认安全姿态。
+ *
+ * 优先级：显式配置 > 已鉴权部署（回显来源）> 本地来源（回显）> 拒绝
+ */
+export function resolveCorsOrigin(requestOrigin) {
+  if (PROXY_CORS_ORIGINS) {
+    if (PROXY_CORS_ORIGINS === "*") return "*";
+    const allow = PROXY_CORS_ORIGINS.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return requestOrigin && allow.includes(requestOrigin) ? requestOrigin : null;
+  }
+  if (!requestOrigin) return null; // 同源请求 / curl：不需要该头
+  if (PROXY_TOKEN) return requestOrigin; // 已鉴权：允许任意来源读取（令牌才是边界）
+  return isLocalOrigin(requestOrigin) ? requestOrigin : null;
 }
 
 // ---------- 路径 → 上游 URL 的映射规则 ----------
 
+const MAX_PATH_SEGMENTS = 12; // 镜像路径不会比这更深（HF LFS 最长约 6 段）
+const MAX_PATH_SEGMENT_LENGTH = 200;
+
+/**
+ * 单段路径安全性校验。
+ *
+ * `encodeURIComponent` **不会**转义 "." 与 ".."，所以 `/hf/a%2f..%2f..%2fapi` 在
+ * URL 规范化后会变成 `https://<mirror>/api` —— 借代理访问镜像站任意路径。
+ * 因此必须在 decode 之后、encode 之前显式拒绝。
+ */
+export function isSafePathSegment(segment) {
+  if (typeof segment !== "string") return false;
+  if (segment.length === 0 || segment.length > MAX_PATH_SEGMENT_LENGTH) return false;
+  if (segment === "." || segment === "..") return false;
+  if (/[/\\]/.test(segment)) return false;
+  if (segment.includes("%")) return false; // 双重编码残留（真实权重文件名不含 %）
+  for (let i = 0; i < segment.length; i++) {
+    const code = segment.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return false; // 控制字符
+  }
+  return true;
+}
+
+function isSafeSegmentList(segments) {
+  if (segments.length > MAX_PATH_SEGMENTS) return false;
+  return segments.every(isSafePathSegment);
+}
+
+/**
+ * 允许重定向命中的镜像 host 集合（来自当前配置的上游列表）。
+ * 只信任"我们自己配置的镜像"，而不是任意攻击者可控的 Location。
+ */
+export function getAllowedRedirectHosts() {
+  return new Set([...getHfUpstreams(), ...getGhRawUpstreams()].map((h) => h.toLowerCase()));
+}
+
+/**
+ * 重定向目标是否可信。
+ * 要求：https + host 命中白名单（含镜像自有子域，如 cdn.hf-mirror.com）。
+ * 未通过时调用方必须拒绝跟随（SSRF 防线）。
+ */
+export function isAllowedRedirect(target, upstreamHost, allowedHosts = getAllowedRedirectHosts()) {
+  if (!target || !(target instanceof URL)) return false;
+  if (target.protocol !== "https:") return false;
+  const host = target.hostname.toLowerCase();
+  if (!host) return false;
+  const fromHost = String(upstreamHost ?? "")
+    .replace(/:\d+$/, "")
+    .toLowerCase();
+  if (fromHost && host === fromHost) return true;
+  for (const allowed of allowedHosts) {
+    if (host === allowed || host.endsWith(`.${allowed}`)) return true;
+  }
+  return false;
+}
+
+function isRedirectStatus(status) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
 /**
  * 返回一组有序的上游候选 URL（按 fallback 顺序）。
- * 空数组表示该路径没有匹配的路由（调用方应回 404）。
+ * 空数组表示该路径没有匹配的路由（或路径不安全），调用方应回 404。
  *
  * - /hf、/hf-transformers：多上游 fallback（见 getHfUpstreams()），默认 hf-mirror.com → hf-api.cn
  * - /gh-raw：多上游 fallback（见 getGhRawUpstreams()），默认 jsdelivr → jsdmirror → ghproxy
@@ -90,13 +229,15 @@ export function buildUpstreamCandidates(reqUrl) {
   const [kind, ...rest] = parts;
 
   if (kind === "hf" || kind === "hf-transformers") {
+    // 段校验：拒绝 "."/".."、含分隔符、超长段、超深路径（路径逃逸防线）
+    if (rest.length === 0 || !isSafeSegmentList(rest)) return [];
     // /hf/{owner}/{repo}/... → 多个 huggingface 镜像依次回退（默认 hf-mirror.com → hf-api.cn）
     const pathTail = `${rest.map(encodeURIComponent).join("/")}${reqUrl.search}`;
     return getHfUpstreams().map((host) => new URL(`https://${host}/${pathTail}`));
   }
   if (kind === "gh-raw") {
     // /gh-raw/{owner}/{repo}/{branch}/{rest} → 多个 jsdelivr 镜像依次回退
-    if (rest.length < 3) return [];
+    if (rest.length < 3 || !isSafeSegmentList(rest)) return [];
     const [owner, repo, branch, ...fileParts] = rest;
     const tail = `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}@${encodeURIComponent(branch)}/${fileParts
       .map(encodeURIComponent)
@@ -234,9 +375,16 @@ const server = http.createServer(async (req, res) => {
   const reqUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
   // CORS（跨源场景：页面 origin 与代理 origin 不一致时）
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // 默认只回显本地 origin / 已鉴权来源，其余不设该头（浏览器按默认安全策略拒绝读取）。
+  const corsOrigin = resolveCorsOrigin(req.headers.origin);
+  if (corsOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Accept, Content-Type, Range, If-None-Match, X-Proxy-Token",
+  );
   res.setHeader("Access-Control-Expose-Headers", "X-Proxy-Worker, Content-Range, Accept-Ranges, Content-Length, ETag");
 
   if (req.method === "OPTIONS") {
@@ -279,19 +427,39 @@ const server = http.createServer(async (req, res) => {
 
     const { response: upstreamRes, upstream } = await requestUpstreamFallback(upstreamCandidates, req.method, headers);
 
-    // 跟随重定向（仅一次，cdn.jsdelivr.net 等常会把 /main 重定向到具体 commit）
-    if (
-      upstreamRes.statusCode === 301 ||
-      upstreamRes.statusCode === 302 ||
-      upstreamRes.statusCode === 307 ||
-      upstreamRes.statusCode === 308
-    ) {
+    // 跟随重定向（仅一次，cdn.jsdelivr.net 等常会把 /main 重定向到具体 commit）。
+    // 安全约束：目标必须是 https 且命中镜像白名单，否则拒绝跟随——
+    // 否则上游（或可控镜像）返回 Location: http://169.254.169.254/... 就变成 SSRF。
+    if (isRedirectStatus(upstreamRes.statusCode)) {
+      if (!PROXY_ALLOW_REDIRECTS) {
+        upstreamRes.resume();
+        res.setHeader("Cache-Control", "no-store");
+        res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("dev-proxy: redirects disabled (PROXY_ALLOW_REDIRECTS=0)");
+        return;
+      }
       const location = upstreamRes.headers.location;
       if (location) {
         upstreamRes.resume();
-        const redirected = new URL(location, upstream);
+        let redirected = null;
+        try {
+          redirected = new URL(location, upstream);
+        } catch {
+          redirected = null; // 非法 Location 一律按不可信处理
+        }
+        const upstreamHost = upstream.hostname ?? upstream.host;
+        if (!isAllowedRedirect(redirected, upstreamHost)) {
+          console.error(
+            `[dev-proxy] 拒绝不可信重定向: ${upstreamHost} -> ${String(location).slice(0, 200)}`,
+          );
+          res.setHeader("X-Proxy-Worker", WORKER_HEADER);
+          res.setHeader("Cache-Control", "no-store");
+          res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("dev-proxy: untrusted redirect target");
+          return;
+        }
         const retry = await requestUpstreamWithRetry(redirected, req.method, headers);
-        forwardHeaders(retry, res, { "X-Proxy-Upstream": upstream.host });
+        forwardHeaders(retry, res, { "X-Proxy-Upstream": upstreamHost });
         res.writeHead(retry.statusCode ?? 200);
         retry.pipe(res);
         return;
@@ -322,13 +490,19 @@ const server = http.createServer(async (req, res) => {
 // 仅作为主模块直接运行时启动服务器（import 时跳过，便于单测）
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
-  server.listen(PORT, () => {
+  server.listen(PORT, PROXY_HOST, () => {
     const upstreams = getGhRawUpstreams();
-    console.log(`[dev-proxy] listening on http://localhost:${PORT}`);
+    console.log(`[dev-proxy] listening on http://${PROXY_HOST}:${PORT}`);
     const hfUpstreams = getHfUpstreams();
     console.log(`[dev-proxy] /hf/*          -> ${hfUpstreams.map((h) => `https://${h}/*`).join(" → ")}`);
     console.log(`[dev-proxy] /gh-raw/*      -> ${upstreams.map((h) => `https://${h}/gh/*`).join(" → ")}`);
     if (upstreams.length > 1) console.log(`[dev-proxy] (gh-raw 按上述顺序自动 fallback，可通过 GH_RAW_UPSTREAMS 环境变量覆盖)`);
     if (hfUpstreams.length > 1) console.log(`[dev-proxy] (hf 按上述顺序自动 fallback，可通过 HF_UPSTREAMS 环境变量覆盖)`);
+    // 安全姿态一次性打印，便于确认"当前是不是开放代理"
+    console.log(
+      `[dev-proxy] 安全：监听 ${PROXY_HOST}${PROXY_HOST === "127.0.0.1" ? "（仅本机可访问）" : "（⚠️ 非回环，请确认已配 PROXY_TOKEN）"}；` +
+        `token ${PROXY_TOKEN ? "已启用" : "未启用"}；3xx 跟随 ${PROXY_ALLOW_REDIRECTS ? "开启（白名单校验）" : "关闭"}`,
+    );
+    if (PROXY_CORS_ORIGINS) console.log(`[dev-proxy] CORS 白名单：${PROXY_CORS_ORIGINS}`);
   });
 }

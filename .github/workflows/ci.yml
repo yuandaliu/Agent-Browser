@@ -81,8 +81,23 @@ jobs:
 
       - name: Verify build outputs exist
         run: |
-          test -f dist/index.html || (echo "::error::dist/index.html missing" && exit 1)
-          test -f dist-embed/local-agent.esm.js || (echo "::error::dist-embed/local-agent.esm.js missing" && exit 1)
+          set -e
+          # 存在 + 非空：空文件同样意味着产物损坏（此前出现过"嵌入产物完全无法加载"的回归）
+          test -s dist/index.html || (echo "::error::dist/index.html missing or empty" && exit 1)
+          test -s dist/search.html || (echo "::error::dist/search.html missing or empty" && exit 1)
+          test -s dist/sw.js || (echo "::error::dist/sw.js missing or empty" && exit 1)
+          test -s dist-embed/local-agent.esm.js || (echo "::error::dist-embed/local-agent.esm.js missing or empty" && exit 1)
+          test -s dist-embed/sw.js || (echo "::error::dist-embed/sw.js missing or empty" && exit 1)
+          # 入口引用的相对 chunk 必须真实存在（拆包配置改坏时最典型的回归形态）
+          missing=0
+          for chunk in $(grep -oE '\./[A-Za-z0-9._-]+\.js' dist-embed/local-agent.esm.js | sort -u); do
+            file="dist-embed/${chunk#./}"
+            if [ ! -s "$file" ]; then
+              echo "::error::missing chunk referenced by local-agent.esm.js: $file"
+              missing=1
+            fi
+          done
+          exit $missing
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

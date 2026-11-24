@@ -11,8 +11,7 @@
  * 用法：先启动 proxy + dev，然后 npm run test:offline
  *   - BASE_URL=http://127.0.0.1:5189  npm run test:offline
  */
-import { chromium } from "playwright-core";
-import { launchBrowser } from "./e2e-helpers.mjs";
+import { launchBrowserSafe } from "./e2e-helpers.mjs";
 
 const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:5189";
 
@@ -25,7 +24,7 @@ const fail = (msg) => {
 
 async function main() {
   log(`启动浏览器，目标 ${BASE_URL}`);
-  const browser = await launchBrowser({ headless: true });
+  const browser = await launchBrowserSafe({ headless: true });
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
 

@@ -37,9 +37,9 @@ function enqueueTrim(task) {
 // IndexedDB 适配器（浏览器）
 // ---------------------------------------------------------------------------
 
-function openDb() {
+function openDb(dbName = DB_NAME) {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(dbName, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(MESSAGES_STORE)) {
@@ -64,46 +64,63 @@ function tx(db, storeName, mode, fn) {
   });
 }
 
-const idbAdapter = {
-  async init() {
-    this._db = await openDb();
-  },
-  async getAll(store) {
-    return tx(this._db, store, "readonly", (s) => s.getAll());
-  },
-  /** 用索引游标倒序取最近 n 条（避免全表 getAll + 排序） */
-  async getRecentFromIndex(store, indexName, n) {
-    return new Promise((resolve, reject) => {
-      const txObj = this._db.transaction(store, "readonly");
-      const idx = txObj.objectStore(store).index(indexName);
-      const req = idx.openCursor(null, "prev");
-      const results = [];
-      req.onsuccess = () => {
-        const cursor = req.result;
-        if (cursor && results.length < n) {
-          results.push(cursor.value);
-          cursor.continue();
-        } else {
-          // prev 方向是倒序，反转回升序
-          resolve(results.reverse());
-        }
-      };
-      req.onerror = () => reject(req.error);
-    });
-  },
-  async add(store, value) {
-    return tx(this._db, store, "readwrite", (s) => s.add(value));
-  },
-  async put(store, value) {
-    return tx(this._db, store, "readwrite", (s) => s.put(value));
-  },
-  async delete(store, key) {
-    return tx(this._db, store, "readwrite", (s) => s.delete(key));
-  },
-  async clear(store) {
-    return tx(this._db, store, "readwrite", (s) => s.clear());
-  },
-};
+/**
+ * 创建绑定到指定库名的 IndexedDB 适配器。
+ *
+ * 多实例隔离靠库名：默认 `local-llm-agent`；宿主可传 `dbName` 让每个 agent 用各自的库，
+ * 否则同一页面的两个 agent 会共享同一份对话历史（互相进入对方上下文）。
+ */
+export function createIdbAdapter(dbName = DB_NAME) {
+  return {
+    dbName,
+    async init() {
+      this._db = await openDb(dbName);
+    },
+    async getAll(store) {
+      return tx(this._db, store, "readonly", (s) => s.getAll());
+    },
+    /** 用索引游标倒序取最近 n 条（避免全表 getAll + 排序） */
+    async getRecentFromIndex(store, indexName, n) {
+      return new Promise((resolve, reject) => {
+        const txObj = this._db.transaction(store, "readonly");
+        const idx = txObj.objectStore(store).index(indexName);
+        const req = idx.openCursor(null, "prev");
+        const results = [];
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (cursor && results.length < n) {
+            results.push(cursor.value);
+            cursor.continue();
+          } else {
+            // prev 方向是倒序，反转回升序
+            resolve(results.reverse());
+          }
+        };
+        req.onerror = () => reject(req.error);
+      });
+    },
+    async add(store, value) {
+      return tx(this._db, store, "readwrite", (s) => s.add(value));
+    },
+    async put(store, value) {
+      return tx(this._db, store, "readwrite", (s) => s.put(value));
+    },
+    async delete(store, key) {
+      return tx(this._db, store, "readwrite", (s) => s.delete(key));
+    },
+    async clear(store) {
+      return tx(this._db, store, "readwrite", (s) => s.clear());
+    },
+  };
+}
+
+// 同名库共享同一个适配器实例：多实例同库时不重复 open（避免连接泄漏）
+const idbAdapterCache = new Map();
+function getIdbAdapter(dbName) {
+  const name = dbName || DB_NAME;
+  if (!idbAdapterCache.has(name)) idbAdapterCache.set(name, createIdbAdapter(name));
+  return idbAdapterCache.get(name);
+}
 
 // ---------------------------------------------------------------------------
 // 内存适配器（Node 单元测试 / 降级兜底）
@@ -145,8 +162,13 @@ export function createMemoryAdapter() {
 // ---------------------------------------------------------------------------
 
 export class MemoryStore {
-  constructor(adapter = null) {
-    this.adapter = adapter ?? idbAdapter;
+  /**
+   * @param {object|null} [adapter] 自定义适配器（Node 测试 / 内存降级）；不传则用 IndexedDB
+   * @param {object} [options]
+   * @param {string} [options.dbName] IndexedDB 库名（多实例隔离用，默认 local-llm-agent）
+   */
+  constructor(adapter = null, options = {}) {
+    this.adapter = adapter ?? getIdbAdapter(options.dbName);
   }
 
   async init() {

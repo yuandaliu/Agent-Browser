@@ -205,7 +205,9 @@
       let loading = false; // 模型加载中
 
       // ============ 嵌入智能体 ============
+      // serviceWorker 默认 false（嵌入默认不接管宿主 scope），本页是项目自身页面，显式开启离线缓存
       const agent = createLocalAgent({
+        serviceWorker: true,
         onProgress: ({ progress, status, file }) => {
           const pct = Math.round(progress * 100);
           progressBar.style.width = `${pct}%`;

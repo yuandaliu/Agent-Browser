@@ -3,10 +3,10 @@
  * 验证：宿主页面渲染、聊天浮窗、createLocalAgent 初始化、模型下拉、控制台零报错
  * 用法：node tests/e2e-embed-probe.mjs <demo-url>
  */
-import { launchBrowser, collectConsole, waitFor } from "./e2e-helpers.mjs";
+import { launchBrowserSafe, collectConsole, waitFor } from "./e2e-helpers.mjs";
 
 const url = process.argv[2] ?? "http://127.0.0.1:5189/demo/embed-demo.html";
-const browser = await launchBrowser({ headless: true });
+const browser = await launchBrowserSafe({ headless: true });
 const page = await browser.newPage();
 const { errors, warnings, logs } = collectConsole(page);
 

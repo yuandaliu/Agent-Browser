@@ -147,3 +147,30 @@ describe("FailureLog — 失败对话持久化", () => {
     expect(log2.getAll()[0].userInput).toBe("持久化测试");
   });
 });
+
+describe("FailureLog — 自由文本裁剪（#18）", () => {
+  it("超长 userInput / answer 也被裁剪，不再是 5MB 保护的漏洞", () => {
+    const log = new FailureLog(createMemoryStorage());
+    const long = "x".repeat(5000);
+    const entry = log.record({ userInput: long, ok: false, reason: "error", answer: long });
+    expect(entry).not.toBeNull();
+    expect(entry.userInput.length).toBeLessThan(700);
+    expect(entry.answer.length).toBeLessThan(700);
+    expect(entry.userInput).toContain("已截断");
+    expect(entry.answer).toContain("已截断");
+  });
+
+  it("短文本原样保留", () => {
+    const log = new FailureLog(createMemoryStorage());
+    const entry = log.record({ userInput: "你好", ok: false, reason: "error", answer: "失败" });
+    expect(entry.userInput).toBe("你好");
+    expect(entry.answer).toBe("失败");
+  });
+
+  it("userInput 缺失时不影响写入", () => {
+    const log = new FailureLog(createMemoryStorage());
+    const entry = log.record({ ok: false, reason: "max_steps" });
+    expect(entry).not.toBeNull();
+    expect(entry.userInput).toBeUndefined();
+  });
+});

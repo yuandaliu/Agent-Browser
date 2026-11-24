@@ -2,11 +2,11 @@
  * e2e-probe.mjs — Phase 1 快速探测
  * 验证：页面打开、加载按钮可见、控制台无报错、WebGPU 可用
  */
-import { launchBrowser, collectConsole, waitFor } from "./e2e-helpers.mjs";
+import { launchBrowserSafe, collectConsole, waitFor } from "./e2e-helpers.mjs";
 
 const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:5189";
 
-const browser = await launchBrowser({ headless: true });
+const browser = await launchBrowserSafe({ headless: true });
 const page = await browser.newPage();
 const { errors, warnings } = collectConsole(page);
 

@@ -155,11 +155,13 @@ describe("save_memory handler", () => {
     expect(result.errorMessage).toContain("记忆系统不可用");
   });
 
-  it("校验失败 → 友好提示（不抛错）", async () => {
+  it("校验失败 → 友好提示，且标记 ok:false（#17 失败口径）", async () => {
     const store = { saveMemory: vi.fn() };
     const result = await runTool("save_memory", { key: "", value: "x" }, { memory: store });
-    expect(result.ok).toBe(true); // runTool 层面是 ok 的（返回的是错误信息字符串）
+    // 业务失败也是失败：否则 getStats().toolFailures 会漏计
+    expect(result.ok).toBe(false);
     expect(result.text).toContain("记忆失败");
+    expect(result.errorMessage).toContain("记忆失败");
     expect(store.saveMemory).not.toHaveBeenCalled();
   });
 });
@@ -180,5 +182,25 @@ describe("recall_memory handler", () => {
     );
     expect(result.text).toContain("name = 小明");
     expect(result.text).toContain("city = 北京");
+  });
+});
+
+describe("runTool — 业务失败口径（#17）", () => {
+  it("calculate 非法表达式 → ok:false + errorMessage", async () => {
+    const result = await runTool("calculate", { expression: "1+" });
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("计算失败");
+    expect(result.errorMessage).toContain("计算失败");
+  });
+
+  it("read_page_content 在非浏览器环境 → ok:false", async () => {
+    const result = await runTool("read_page_content", {});
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("读取失败");
+  });
+
+  it("recall_memory 空结果不算失败（属于正常返回）", async () => {
+    const result = await runTool("recall_memory", { query: "x" }, { memory: { recall: async () => [] } });
+    expect(result.ok).toBe(true);
   });
 });

@@ -5,7 +5,7 @@
 > **维护约定**：完成一项即把 `[ ]` 改为 `[x]`；新增任务追加到对应批次末尾。
 > 变更与验证的过程由 git 记录，本文档只保留**计划、依据与结论**。
 >
-> 最后更新：2026-10-15
+> 最后更新：2026-11-17
 
 ## 固定动作（每批结束都要做）
 
@@ -20,6 +20,9 @@
   批次 A 调整了单测（新增快照矩阵 / 元数据锚定 / 接线 / SW 守卫，删除 cacheFirst 旧测），
   复跑确认为 **311 passed**（2026-10-15）；再叠加下方「批次 A 后续补强」的 SW 守卫后为 **312 passed / 21 files**，
   `npm run lint` 仍为 0 问题
+- **2026-11-24 实测基线（Node 22.23.2）**：`npm test` = **389 passed / 22 files**；覆盖率（src+server 口径）
+  Stmts/Lines **84.29%**、Branch **80.28%**、Funcs **82.74%**；`coverage.thresholds` 已按"实测 −3%"启用
+  （81 / 81 / 79 / 77），并用"把 lines 抬到 99%"反向验证过门禁**确实会失败**（exit 1）
 - **已完成**：第 0 批全部；第 1 批的 P0-1a / P0-1b / P0-1c；第 2 批的 P0-3 与「解析器兼容性」条目；
   **REVIEW 批次 A 的 A1 / A4 / A5 / A8 / A9**
 - **暂缓**：第 1 批的 P0-2 / P0-2b / P0-2c（需真实 WebGPU 做协议 A/B 与约束解码生效性确认）
@@ -61,9 +64,12 @@
 ### P1 · 真机验收（你）——A1 / A5 唯一能被证明的地方
 
 - [ ] **P1-A** `npm run proxy` + `npm run dev` → 打开 <http://127.0.0.1:5189>
-  - **A5**：控制台 `[embed] 已初始化` 附近出现「为你的设备推荐：…」，且下拉自动切到推荐档（4 核以上应为 2B，不再是 0.8B）
+  - **A5**：控制台 `[embed] 已初始化` 附近出现「为你的设备推荐：…」，且下拉自动切到推荐档
+    （按 `recommendMinCores` 逻辑：**4–11 核 → 2B，12 核及以上 → 4B**；不再是固定的 0.8B）
   - **A1**：DevTools → Application → Cache Storage 只有 `local-agent-app-v3`，**没有** `local-agent-models-*`；
-    从旧版本升级的浏览器里，遗留的 `local-agent-models-v2` 已被 activate 清掉
+    从旧版本升级的浏览器里，遗留的 `local-agent-models-v2` 已被 activate 清掉。
+    ⚠️ SW 注册是异步的（`ready()` 刻意不 `await navigator.serviceWorker.ready`），**首次打开可能还没建立缓存，
+    刷新一次再看**
   - **清理归零**：加载 2B 档后记录 `await agent.getStorageEstimate()` → `await agent.deleteModelArtifacts()` → 占用应回落到加载前量级
   - **A1 离线回归（最容易出事的一条，必做）**：模型加载完成后，在 DevTools → Network 面板再次 `await agent.load()`，
     确认**没有新的 `/hf/*` 请求**——这一步验证的是 REVIEW 的代码推断"SDK 缓存命中后不再发起 fetch"，
@@ -71,31 +77,53 @@
     **若失败**（离线加载不出来）：说明 SDK 仍会发 fetch，A1 需改采方案②——恢复 SW 拦截，但让
     `deleteModelArtifacts()` 一并 `caches.delete("local-agent-models-*")`，并在 UI/README 说明存在两层缓存
 - [ ] **P1-B** `npm run test:offline`（需 proxy + dev 已启动）
-- [ ] **P1-C** `npm run test:e2e`（需真实 WebGPU）
+- [ ] **P1-C** `npm run test:e2e`（需真实 WebGPU）——**成本高、优先级低**：它会真实下载模型并跑完整对话验收
+      （进度条 / 时间工具 / 12×34 / 跨轮记忆等），而这些验收点**在批次 A 之前就已存在**，与 A1/A5 的改动
+      关系较弱。建议在 P1-A 通过之后再跑
+- [ ] **P1-D（仅特定场景需要）** 重建构建产物：`npm run build` + `npm run build:embed`，并确认 `dist/sw.js`
+      与 `dist-embed/sw.js` 内的 `VERSION` 都是 **v3**（两者当前仍是 **v2**，分别构建于 09-20 与 09-15）。
+      `npm run dev` 与「Vercel/Netlify 平台自动构建」都不需要它；**只有用 `npm run preview` 或手工上传现有
+      `dist/` 时才必须先做**——否则部署出去的仍是带双重缓存缺陷的旧 SW
 
 ### P2 · 需人工决策
 
 - [ ] **P2-A** A5 的 12 核门槛是否接受（影响：8 核 16GB 机器不自动推 4B）；要改只动 `MODEL_OPTIONS` 的 `recommendMinCores`
-- [ ] **P2-B** 是否启动第 5 批（多模态 / 语音）：代价是 `dist-embed/` 从 ~6MB 涨到 67MB
-- [ ] **P2-C** `.tmp/verify-a1.mjs` / `verify-a5.mjs` 是否正式化到 `tests/`
-      （沙箱内不依赖 vitest 的等价验证脚本，当前留在 gitignore 的 `.tmp/`）
+- [ ] **P2-B** 是否启动第 5 批（多模态 / 语音）
+      ⚠️ **代价表述已修正**：`dist-embed/` **当前就已经是 67MB**（其中 `transformers.web-*.js` 占 60.9MB，
+      是 SDK 的 Transformers.js 依赖被静态打入的，**与是否做多模态无关**）。所以真正的取舍不是"从 6MB 涨到 67MB"，
+      而是：**做了多模态之后，就无法再靠"砍掉那 61MB"来瘦身**（README「方式二」记的那条优化随之失效）。
+      要瘦身只能改走"多模态单独出一个可选构建产物"这条路
+- [x] **P2-C** `.tmp/verify-a1.mjs` / `verify-a5.mjs` 的**去留评估** —— **2026-11-18 已处置**：
+      连同 `verify-eval` / `probe-server` / `probe.cjs` / `unzstd2` / `extract-todos` 共 7 个临时脚本**全部删除**
+      （删除前确认代码与脚本中零引用，唯一文档引用就是本条）。它们的验证范围已由单测与 `tools/verify` 承接
 
 ### P3 · 真机测量（你）——批次 A′ 与第 1 批剩余
 
 - [ ] **P3-A** A2 采样参数：`temperature` 0.2–0.5 + `seed: null`（保留 `repetitionPenalty` / `frequencyPenalty`），连问 3 次看措辞变化与 `getStats().toolFailures`
 - [ ] **P3-B** A3 推理进 Worker：生成时用 Performance 面板看 long task 是否 >50ms 且频繁
-- [ ] **P3-C** A6 上下文：核实 MLC `max_history_size: 1` 的语义，并用长对话看 `failureLog` 有无 context 相关失败
+- [ ] **P3-C** A6 上下文：用长对话看 `failureLog` 有无 context 相关失败（**这是需要真机的那一半**）
+      注：另一半「核实 MLC `max_history_size: 1` 的语义」**不需要真机**（查文档/源码即可），已拆到 P4-F
 - [ ] **P3-D** P0-2 三协议 A/B（决定 `auto` 默认值）
 - [ ] **P3-E** P0-2c `json` 约束解码在 0.8B / 2B / 4B 三档的生效性
 
 ### P4 · 后续排期（可接手）
 
-- [ ] **P4-A** `REVIEW.md` D4 评测基线：20 条工具调用用例（多步 / 需拒绝调用 / 参数缺失 / 诱导注入）
-      + 成功率 / 平均步数 / TTFT 表格——**P3-A、P3-D 与 C2 的收益都以它为前置**
+- [~] **P4-A 评测基线框架**：**框架已完成（2026-10-15）** —— `tests/eval-cases.mjs`（20 条用例，覆盖
+      单步工具 / 多步组合 / 无需工具 / 参数异常 / 注入诱导）+ `tests/eval-agent.mjs`（跑分脚本：成功率 /
+      平均步数 / 平均 TTFT，支持 `--limit=` 与 `--json=`）+ `tests/unit/evalCases.test.js`（用例集自身
+      一致性守卫）+ `npm run test:eval`。**剩余**：在真机 WebGPU 上跑出第一份基线数字，之后随版本回归
+      ——**P3-A、P3-D 与 C2 的收益都以它为前置**
 - [ ] **P4-B** C3 搜索工具重做（SearXNG 经 `dev-proxy` 同源转发，保留 Wikipedia 兜底）
 - [ ] **P4-C** C2 工具调用可靠性三件套（含"一次输出多个 `tool_call` 时顺序执行"，现状会静默丢弃）
 - [ ] **P4-D** 第 5 批多模态（B1 截图理解 / B2 语音 / B3 能力槽位可视化）
 - [ ] **P4-E** 批次 C 的 C1 WebMCP 适配器 + C1b 安全闸门
+- [x] **P4-F 核实 MLC `max_history_size: 1` 的语义**（从 P3-C 拆出）——**已完成（2026-10-15，未用真机）**：
+      该值**只**用于 `create_rnn_state`（`@mlc-ai/web-llm/lib/index.js:9992-9995`，整段包在
+      `if (resolvedModelABI.needsRNNState)` 内），是 **RNN 类模型（Mamba / RWKV）的递归状态形状**；
+      Qwen3.5 是 Transformer，走 `createKVCache`（同文件 `:9986`），**与对话历史无关**。
+      原「KV cache 只留最近 1 轮」的猜测**被证伪** → 真因回到项目自身裁剪（`MAX_HISTORY_MESSAGES = 8`
+      + 每条 500 字符）；KV cache 容量由 `context_window_size`（`LoadOptions.contextLength`）决定，
+      这才是 A6 该动的旋钮。详见 `REVIEW.md` §5 风险表
 
 ## 第 0 批 · 基础设施（已完成）
 
@@ -257,6 +285,68 @@
 - **不做 npm 发布**（定位为技术作品）
 - **不做工程治理类扩充**：CHANGELOG / Dependabot / Issue 模板 / coverage 阈值（截至当前定位收益低；LICENSE 已补齐）
 
+## 批次 E · 2026-11 补盲轮修复（已实施，待门禁复核）
+
+> 来源：`REVIEW.md` §6。约束：只改必要默认值（`serviceWorker` 默认 false、`unparsed` 失败语义），
+> 其余"会改变宿主可感知行为"的项（#8 SW 策略本身、#22 空列表）不动。
+
+- [x] **E1 dev-proxy 安全**：`listen(PORT, PROXY_HOST)` 默认 `127.0.0.1`；CORS 默认只回显本地 origin
+      （`PROXY_CORS_ORIGINS` 放开）；3xx 只跟随白名单 https 目标（`PROXY_ALLOW_REDIRECTS` 关闭开关）；
+      令牌改 `sha256 + timingSafeEqual`；`..` / 双重编码 / 超深路径一律 404
+- [x] **E2 并发与生命周期**：`chat` 守卫提前到 `await` 之前；`clearHistory()` 先中止并等待在途轮次（新增 `abort()`）；
+      `emit` 隔离宿主回调异常、`initPromise` 失败可重试；`serviceWorker` 默认改 `false`，index / search 显式开启
+- [x] **E3 预算与注入**：新增 `MESSAGE_TOTAL_BUDGET = 12000` 与 `fitMessages()`（先降级 observation / assistant，
+      再删最早历史）；`USER_INPUT_BUDGET = 4000`；页面标题 / 网址走 `buildPageMetaNotice()`（数据非指令标注 + 120 字符上限）；
+      `getPageSnapshot` 缓存分支重新截断；隐藏元素文本不再读入；非法选择器回退整页
+- [x] **E4 解析与失败语义**：`stripThinking` 补换行；裸值参数按标记截断；新增 `unparsed`（仅"有工具意图却解析失败"）；
+      循环检测键改按键排序序列化；`runTool` 按前缀把业务失败计入 `ok:false`
+- [x] **E5 记忆与日志**：记忆按 `timestamp` 倒序装箱；失败日志裁剪 `userInput / answer`；新增 `dbName` 多实例隔离
+- [x] **E6 门禁与文档**：CI 构建校验加非空 + chunk 引用；
+      `public/sw.js` 纳入 lint（SW globals）；`INTEGRATION.md` 补 `ok / reason / abort` 与三个构造参数；README 同步
+      （覆盖率阈值先按猜测值加在顶层，后被 E8 修正为 `test.coverage` + 实测 −3%）
+- [x] **E7 门禁复核**：
+  - [x] **垫片执行单测（2026-11-17）**：`tools/verify/`（`mini-vitest.mjs` + `vitest-loader.mjs` +
+        `shim-register.mjs` + `run-unit-shim.mjs`）用 Node 的 module hook 把 `import "vitest"` 重定向到
+        最小垫片，**不经 esbuild** 直接执行测试文件：**13 个文件 / 293 项断言，0 失败、退出码 0**（约 5s）。
+        覆盖 `agentLoop` / `agentLoop.runAgent` / `agentLoop.protocol` / `contextBudget` / `devProxy` /
+        `failureLog` / `memory` / `modelLoader` / `pageReader` / `swStrategies` / `tools` / `toolSchemas` /
+        `chatWidget`。
+        跑法：`node --import ./tools/verify/shim-register.mjs tools/verify/run-unit-shim.mjs`（需 Node ≥ 20.6）
+        —— 这同时反证了一件事：本轮新增的 30+ 条用例里，凡属纯逻辑分支的都是**真跑通过**的，不是"写完即算"。
+  - [x] `npm run lint`（含 `public/`、`--max-warnings=0`）= 0 问题
+  - [x] **字节检查（2026-11-18）**：`tools/verify` 4 个新文件 `BOM=false`、`CR=0`（纯 LF 无 BOM）；
+        `git diff --check` 通过；垫片回归仍为 13 文件 / 293 项 / 0 失败
+  - [x] **垫片不覆盖的 9 个文件（2026-11-24 已在本机跑通）**：`embed`（`vi.mock` 替换 SDK / 记忆 / 页面读取 / 失败日志）、
+        `tools.handlers`（mock pageReader）、`devProxy.fallback`（mock `node:https`）、`main.helpers`、
+        `modelLoader.createModelLoader`、`swSync`、`pageReader.bootstrap`、`memory.trim`、`evalCases`
+        —— 用 Node 22.23.2 直接跑 vitest **22 文件 / 389 条全部通过**。
+        前提：必须在**非沙箱**环境运行（vitest 依赖 esbuild spawn 子进程，受限沙箱会 EPERM）
+- [x] **E8 覆盖率基线（2026-11-24）**：实测（src+server 口径，389 条全绿）
+      Stmts/Lines **84.29%** · Branch **80.28%** · Funcs **82.74%** → 阈值按"实测 −3%"设为 **81 / 81 / 79 / 77**。
+      **同时修掉一处静默失效**：vitest 3 的覆盖率配置属于 `test.coverage`，此前写在顶层被忽略——
+      默认口径把 `dist-embed/`（约 4.5 万行打包产物）、`public/sw.js`、`tools/verify/` 计入分母，
+      把总量稀释到 **6.82%**（branch 却有 79.5%）。现改为 `test.coverage` +
+      `include: ["src/**/*.js", "server/**/*.mjs"]`；反向验证：`--coverage.thresholds.lines=99`
+      → `ERROR: Coverage for lines (84.29%) does not meet global threshold (99%)` + exit 1
+- [x] **E10 #22 补告警（2026-11-17）**：`getAvailableModelOptions()` 在"目录与 `MODEL_OPTIONS` 零交集"时
+      原本静默返回全部——那正是最坏情况（展示的每一档都不可加载）。现补一次 `console.warn`
+      （含目录项数 + 排查方向），返回形态**保持不变**（避免宿主下拉空白）；JSDoc 同时写明该上限与升级路径
+      （宿主可自行 filter，或后续加 `{ strict: true }`）。新增 2 条单测：零交集必告警、空目录不告警
+- [ ] **E9（可选）**：把 `tools/verify/` 纳入 lint 范围（需补 Node globals），目前它和 `tools/git-push.ps1`
+      一样不在 lint 门禁内
+- [x] **E11 audit 收尾（2026-11-18）**：按 `winlean-coding audit` 的结论做"低风险收尾"——
+      ① `vitest.config.js` 覆盖率阈值整段注释（50/50/40 是未测量值，等 E8 基线后再启用）；
+      ② USAGE 的垫片命令前补 `nvm use 22`（本机 PATH 默认 18.12.1，照抄会 `bad option: --import`）；
+      ③ `tools/verify` 两个文件补**退场条件**（环境恢复即删）；
+      ④ INTEGRATION 的 `dbName` 标注"预留"；⑤ `PROXY_ALLOW_REDIRECTS` 标注"仅调试"；
+      ⑥ USAGE 注明 CI 的构建校验是 bash、仅 CI 生效；⑦ REVIEW §6.1 补注（#8/#22 未改完，避免误读）；
+      ⑧ 删除 `.tmp/` 7 个零引用临时脚本（P2-C 结项）。
+      **未做（已记录理由）**：3 个"仅测试用"常量导出收敛、chatWidget 双机制合并、`isElementHidden` 缓存删除、
+      `tools/verify` 接入 lint —— 均属重构/性能取舍，需真机跑测才能证明无回归，当前收益不抵风险
+
+> **环境注记**：`vitest.config.js` 顶部曾写"独立配置可绕开 esbuild spawn 问题"，该结论不成立
+> （vitest 加载任何配置都经 vite 的 config bundler）。已在配置文件内更正，并指明受限环境下的替代验证路径。
+
 ## 决策记录
 
 - [x] 项目定位：**技术作品**（优先"效果可见 + 技术密度"，而非可集成性）
@@ -267,6 +357,7 @@
 - [x] 采纳 `REVIEW.md` 批次 A 的必修项（A1 双重缓存 / A4 显存门槛 / A5 推荐接线 / A8 文档 / A9 文案）：**已实施**
   - A1 选方案①：SW 不再拦截模型路径，模型缓存唯一交给 SDK 的 IndexedDB（`VERSION` v2 → v3 以回收历史死副本）
   - A4 定为 3.8GB（与 0.8B / 2B 同口径的向上取整）；A5 另引入 `recommendMinCores`（4B 需 12 核以上才自动推荐）
+- [x] 2026-11 补盲轮（`REVIEW.md` §6）：P1 八条 + P2 确定性项已实施，详见下方「批次 E」
 
 ## 风险登记
 

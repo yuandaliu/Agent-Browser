@@ -101,14 +101,15 @@ const { answer } = await agent.chat("现在几点", {
 | `ready()` | 初始化（IndexedDB + WebGPU 探测 + 事件订阅 + **启动页面实时内容监听**），幂等 |
 | `load(modelId?)` | 加载模型（默认 `options.modelId` / 推荐档），单飞保护；id 不在 SDK 目录时降级到最低可用档并 `console.warn` |
 | `unload()` / `dispose()` | 卸载模型 / 完全销毁（含停止页面监听、释放 WebGPU 上下文与 worker） |
-| `chat(text, { onStep, onDelta })` | 对话，自动写入历史；返回 `{ answer, steps, rawTexts }`；输入为空或模型未加载会抛错 |
+| `chat(text, { onStep, onDelta, signal })` | 对话，自动写入历史。**失败不抛错**：返回 `{ answer, steps, rawTexts, ok: false, reason }`，`reason` ∈ `aborted` / `loop` / `max_steps` / `error` / `unparsed`（后者=模型有工具意图但格式解析失败），`answer` 仍是可直接展示的文案。仅在**输入为空**、**模型未加载**、**上一轮未结束**（`"chat: 已有对话正在进行"`）时抛 `Error` |
+| `abort()` | 中止在途对话，返回 `boolean`（是否有对话被中止）。`clearHistory()` 内部也会先中止在途轮次 |
 | `isModelLoaded()` / `getLoadedModelId()` | 加载状态查询 |
-| `getRecommendedModelId()` / `getAvailableModels()` | 推荐档位 / 可用档位列表 |
+| `getRecommendedModelId()` / `getAvailableModels()` | 推荐档位 / 可用档位列表（SDK 目录不可用或与配置零交集时降级为全部并 `console.warn`） |
 | `getStats()` / `clearStats()` | 性能快照（字段见 `README.md`「性能与可观测性」）/ 清空 |
 | `getStorageEstimate()` | 源站存储占用 / 配额估算（浏览器会取整）；不可用时返回 `null` |
 | `getCacheStatus(modelId?)` | 指定模型（默认当前档）的下载缓存状态；模型不存在或查询失败返回 `null` |
 | `deleteModelArtifacts(modelId?)` | 删除模型下载缓存（不传参则清空全部模型产物）；目标模型正在使用时会先被释放，只动模型缓存、不影响对话历史 |
-| `getHistory()` / `clearHistory()` | 对话历史读写（跨轮上下文） |
+| `getHistory()` / `clearHistory()` | 对话历史读写（跨轮上下文）。`clearHistory()` 会**先中止在途对话并等它落地**再清库，避免留下没有对应 user 的孤儿 assistant 消息 |
 | `getMemories()` / `saveMemory(k, v)` / `recallMemory(q)` / `clearMemories()` | 长期记忆 |
 | `getFailureLog()` / `clearFailureLog()` | 失败对话调试日志（最近 20 条） |
 | `getSWRegistration()` | 当前 Service Worker 注册对象 |
@@ -125,9 +126,10 @@ const { answer } = await agent.chat("现在几点", {
 | `maxSteps` | 5 | 工具调用循环最大步数 |
 | `toolProtocol` | `"auto"` | 工具调用协议：`"auto"`（Qwen 系走原生 `<tool_call>` / `<tool_response>`，其他模型走 ReAct）/ `"react"` / `"native"` / `"json"`（约束解码）。详见 `README.md`「工具调用协议」 |
 | `memoryAdapter` | `null`（IndexedDB） | 自定义记忆适配器 |
-| `serviceWorker` | `true` | 是否注册 Service Worker。**嵌入宿主站点时建议设 `false`**，避免与宿主自有 SW 抢占 scope |
-| `swPath` | `"/sw.js"` | SW 脚本路径。子路径部署（如 `/local-agent/`）时必须改为实际路径，否则注册失败 |
-| `swScope` | 不传（浏览器默认=脚本所在目录） | SW scope。不传时用浏览器默认（sw.js 所在目录），不会接管宿主全站 |
+| `dbName` | `"local-llm-agent"` | IndexedDB 库名。**预留**：只有"同一页面跑多个互不干扰的 agent"才需要传；普通用法不传即可（否则它们共享同一份对话历史） |
+| `serviceWorker` | **`false`** | 是否注册 Service Worker。**默认关闭**：`register("/sw.js")` 的默认 scope 是"脚本所在目录"，根部署即整站，会接管宿主全站的导航与 `/assets/*` 缓存。本项目自己的页面（`src/main.js` / `search.html`）显式传 `true` |
+| `swPath` | `"/sw.js"` | SW 脚本路径（仅 `serviceWorker: true` 时生效）。子路径部署（如 `/local-agent/`）时必须改为实际路径 |
+| `swScope` | 不传（浏览器默认=脚本所在目录） | SW scope。**注意**：不传时 scope 就是 `swPath` 所在目录，根部署时等于 `/`（会接管整站）；要收紧必须显式传值 |
 | `onEvent` | — | 统一事件回调（`progress` / `status` / `ready` / `hardware` / `model-recommended` / `sw` / `chat-stats`） |
 | `onProgress` / `onStatus` / `onReady` / `onError` | — | 拆分的加载事件回调 |
 
@@ -274,7 +276,8 @@ await agent.ready(); // ready() 内部会探测硬件并通过 onError 报告
 - **样式隔离**：`embed.js` 不注入任何样式；浮窗 UI（`demo/embed-demo.html` 的 `#la-*` 选择器）使用带前缀的
   类名，避免与宿主冲突。也可改用 Shadow DOM 挂载。
 - **全局副作用（须知）**：不修改 `window` 全局对象，但 `pageReader.js` 会做三件事——① patch
-  `history.pushState` / `history.replaceState`（用于感知 SPA 路由变化，幂等且不改写原有行为）；
+  `history.pushState` / `history.replaceState`（用于感知 SPA 路由变化，幂等只 patch 一次；
+  `dispose()` 时还原原方法，且还原前会确认"仍是自己的补丁"，不会覆盖宿主后续的 patch）；
   ② 在 `document.body` 上注册一个 600ms 防抖的 `MutationObserver`；③ 监听 `popstate`。
   宿主若也 patch 过这两个 history 方法，注意叠加顺序；不需要页面读取能力时可在 `dispose()` 后不再 `ready()`。
   存储侧仅占用一个 IndexedDB 数据库 `local-llm-agent`（消息历史 + 记忆）。

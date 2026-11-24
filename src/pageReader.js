@@ -76,20 +76,75 @@ export function truncateText(text, maxChars = DEFAULT_MAX_CHARS) {
 // DOM 相关（浏览器环境）
 // ---------------------------------------------------------------------------
 
-/** 从根元素提取可见文本（跳过噪声元素与表单值） */
+/**
+ * 判断一份 computed style 是否等于"不可见"。
+ * 抽成纯函数：单测可注入假 style，不必依赖真实 DOM。
+ */
+export function isCssHidden(style) {
+  if (!style) return false;
+  if (style.display === "none") return true;
+  if (style.visibility === "hidden" || style.visibility === "collapse") return true;
+  if (style.opacity === "0") return true;
+  return false;
+}
+
+// 逐元素缓存"是否隐藏"：一次页面读取可能遍历上千个文本节点，
+// 每个都调 getComputedStyle 会触发同步强制样式计算（明显变慢）。
+// 每次 extractVisibleText 开始时重建，避免样式变化后缓存陈旧。
+let hiddenCache = new WeakMap();
+
+function isElementHidden(el) {
+  if (!el || el.nodeType !== 1) return false;
+  const cached = hiddenCache.get(el);
+  if (cached !== undefined) return cached;
+  let hidden = false;
+  try {
+    // 廉价路径：属性/类选择器命中（[hidden]、.sr-only、aria-hidden 等）
+    if (el.closest?.(EXCLUDED_SELECTOR)) {
+      hidden = true;
+    } else if (typeof getComputedStyle === "function") {
+      // 计算样式路径：display:none / visibility:hidden / opacity:0
+      hidden = isCssHidden(getComputedStyle(el));
+    }
+  } catch {
+    hidden = false; // 读取失败按"可见"处理，宁可多带文本也不要漏内容
+  }
+  hiddenCache.set(el, hidden);
+  return hidden;
+}
+
+/** 从根元素提取可见文本（跳过噪声元素、隐藏元素与表单值） */
 function extractVisibleText(root) {
   if (typeof document === "undefined") return "";
+  hiddenCache = new WeakMap(); // 每次读取重建：DOM 与样式可能已变化
   const parts = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node;
   while ((node = walker.nextNode())) {
     const parent = node.parentElement;
     if (!parent) continue;
-    if (parent.closest(EXCLUDED_SELECTOR)) continue;
+    if (isElementHidden(parent)) continue;
     const text = node.textContent.replace(/\s+/g, " ").trim();
     if (text) parts.push(text);
   }
   return parts.join("\n");
+}
+
+/**
+ * 解析 CSS 选择器到根元素（纯逻辑，可注入假 doc 做单测）。
+ *
+ * 非法选择器（如模型生成的 `div[`）会让 querySelector 抛 SyntaxError —— 这里转成
+ * error 字段，由调用方走"回退整页"，而不是让整个工具直接失败。
+ */
+export function resolveSelectorRoot(doc, selector) {
+  if (!doc || typeof doc.querySelector !== "function" || !selector) {
+    return { root: null, error: null };
+  }
+  try {
+    return { root: doc.querySelector(selector) ?? null, error: null };
+  } catch (err) {
+    return { root: null, error: err?.message ?? "非法 CSS 选择器" };
+  }
 }
 
 /** 候选元素的正文评分（文本密度 × 长度权重） */
@@ -128,13 +183,55 @@ export function pickMainContent(doc = null) {
 // 实时缓存（MutationObserver）
 // ---------------------------------------------------------------------------
 
+/**
+ * 给 history 打 SPA 路由补丁（pushState / replaceState），返回还原句柄。
+ *
+ * 单独抽出的原因：Node 单测没有 DOM，无法通过 initPageWatcher 覆盖这段逻辑；
+ * 而这个补丁是**对宿主页面的全局副作用**，必须可验证、可撤销（REVIEW-2026-11 #7）。
+ * 旧实现是模块级永久 patch：dispose 之后宿主的每次路由切换仍会触发闭包里的刷新，
+ * 且补丁永远留在宿主页面上。
+ *
+ * @param {() => void} onRouteChange 路由变化回调
+ * @param {object|null} [historyRef] 测试可注入；默认用全局 history
+ * @returns {{patched: boolean, restore: () => void}}
+ */
+export function patchHistory(onRouteChange, historyRef = typeof history !== "undefined" ? history : null) {
+  if (!historyRef || typeof historyRef.pushState !== "function") {
+    return { patched: false, restore: () => {} };
+  }
+
+  const originalPush = historyRef.pushState;
+  const originalReplace = historyRef.replaceState;
+  const patchedPush = function (...args) {
+    const result = originalPush.apply(this, args);
+    onRouteChange();
+    return result;
+  };
+  const patchedReplace = function (...args) {
+    const result = originalReplace.apply(this, args);
+    onRouteChange();
+    return result;
+  };
+
+  historyRef.pushState = patchedPush;
+  if (typeof originalReplace === "function") historyRef.replaceState = patchedReplace;
+
+  return {
+    patched: true,
+    restore() {
+      // 只还原"仍是我们的补丁"：宿主后续自己 patch 时不能被我们覆盖回去
+      if (historyRef.pushState === patchedPush) historyRef.pushState = originalPush;
+      if (historyRef.replaceState === patchedReplace) historyRef.replaceState = originalReplace;
+    },
+  };
+}
+
 let cache = { version: 0, text: "", updatedAt: 0 };
 let refreshTimer = null;
 let observer = null;
 let observerRefCount = 0;
 let popstateHandler = null;
-let pushStatePatched = false;
-let replaceStatePatched = false;
+let historyPatch = null; // { patched, restore() }：SPA 路由补丁的还原句柄
 // 共享 bootstrap 句柄：所有 caller 共用一个 DOMContentLoaded 监听器，
 // 第一次触发时调用 initPageWatcher 创建 observer，避免重复监听或重复 init。
 let sharedBootstrap = null;
@@ -228,6 +325,7 @@ export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS
       };
     }
     const scheduleRefresh = () => {
+      if (!observer) return; // dispose 之后（补丁已还原，保险起见再挡一层）不再刷新
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => refreshCache(maxChars), debounceMs);
     };
@@ -239,24 +337,9 @@ export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS
       popstateHandler = scheduleRefresh;
       window.addEventListener("popstate", popstateHandler);
     }
-    // patch pushState + replaceState 覆盖 SPA 路由切换（幂等，只 patch 一次）
-    if (!pushStatePatched && typeof history !== "undefined" && typeof history.pushState === "function") {
-      const original = history.pushState;
-      history.pushState = function (...args) {
-        const result = original.apply(this, args);
-        scheduleRefresh();
-        return result;
-      };
-      pushStatePatched = true;
-    }
-    if (!replaceStatePatched && typeof history !== "undefined" && typeof history.replaceState === "function") {
-      const original = history.replaceState;
-      history.replaceState = function (...args) {
-        const result = original.apply(this, args);
-        scheduleRefresh();
-        return result;
-      };
-      replaceStatePatched = true;
+    // patch pushState + replaceState 覆盖 SPA 路由切换（幂等，只 patch 一次；dispose 时还原）
+    if (!historyPatch) {
+      historyPatch = patchHistory(scheduleRefresh);
     }
 
     refreshCache(maxChars); // 初始快照
@@ -280,6 +363,10 @@ export function initPageWatcher({ debounceMs = 600, maxChars = DEFAULT_MAX_CHARS
           window.removeEventListener("popstate", popstateHandler);
           popstateHandler = null;
         }
+        // 还原 history 补丁：否则 dispose 之后宿主的每次路由切换仍会触发闭包里的
+        // scheduleRefresh（继续读 DOM、写缓存），且我们打的补丁永远留在宿主页面上。
+        historyPatch?.restore();
+        historyPatch = null;
       }
     },
   };
@@ -302,15 +389,18 @@ export function getPageSnapshot({ selector = null, maxChars = DEFAULT_MAX_CHARS 
   const readWholePage = () => {
     if (cache.version > 0) {
       const rawLen = cache.rawLength ?? cache.text.length;
+      // 缓存文本是按 watcher 初始化时的 maxChars 生成的；调用方可能传更小的值，
+      // 这里必须重新截断，否则 getPageSnapshot({maxChars}) 的契约失效。
+      const text = truncateText(cache.text, maxChars);
       return {
         ok: true,
         title: document.title,
         url: location.href,
-        text: cache.text,
+        text,
         length: rawLen,
         source: "cache",
         updatedAt: cache.updatedAt,
-        truncated: rawLen > maxChars,
+        truncated: text.length < rawLen,
       };
     }
     const root = pickMainContent() ?? document.body;
@@ -328,8 +418,15 @@ export function getPageSnapshot({ selector = null, maxChars = DEFAULT_MAX_CHARS 
   };
 
   if (selector) {
-    // 指定区域：实时精确读取
-    const root = document.querySelector(selector);
+    // 指定区域：实时精确读取。非法选择器（语法错误）不能让工具直接失败，
+    // 与"未命中"一样回退整页并附说明——模型可能生成 `div[` 这类不完整选择器。
+    const { root, error } = resolveSelectorRoot(document, selector);
+    if (error) {
+      return {
+        ...readWholePage(),
+        note: `选择器 "${selector}" 无效（${error}），已自动读取整个页面。`,
+      };
+    }
     if (!root) {
       // 选择器未命中：自动回退整页，避免模型在错误选择器上空转浪费步数
       return { ...readWholePage(), note: `未找到选择器 "${selector}" 对应的元素，已自动读取整个页面。` };

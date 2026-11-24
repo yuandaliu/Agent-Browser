@@ -100,15 +100,36 @@ npm run dev
 | `npm run build` | 构建应用产物（dist/） | — |
 | `npm run build:embed` | 构建嵌入单文件产物（dist-embed/） | — |
 | `npm run preview` | 本地预览构建产物（dist/） | 需先 `npm run build` |
-| `npm run lint` | ESLint 检查（src / tests / server） | — |
+| `npm run lint` | ESLint 检查（src / tests / server / public） | — |
 | `npm run precommit` | ESLint 严格模式（`--max-warnings=0`），与 CI 门禁一致；仓库已配 `.git/hooks/pre-commit` | — |
 | `npm test` | 单元测试（vitest） | 无需服务 |
-| `npm run test:coverage` | 单元测试 + 覆盖率报告 | 无需服务 |
+| `npm run test:coverage` | 单元测试 + 覆盖率报告；门槛按 src+server 口径 **81/81/79/77**（实测 −3%），跌破即失败 | 无需服务 |
 | `npm run test:probe` | 页面探测：加载按钮 / WebGPU / 控制台零报错（不加载模型） | proxy + dev |
 | `npm run test:e2e` | 完整 E2E 验收（Playwright + 系统 Chrome + WebGPU） | proxy + dev |
 | `npm run test:embed` | 嵌入示例验证 | proxy + dev |
 | `npm run test:search` | 智能搜索页（仿百度 + 悬浮球聊天弹窗）验证 | proxy + dev |
 | `npm run test:offline` | Service Worker 离线缓存 E2E | proxy + dev |
+| `npm run test:eval` | **工具调用评测基线**：20 条用例 → 成功率 / 平均步数 / 平均 TTFT | proxy + dev + WebGPU |
+| `npm run test:eval -- --limit=3` | 同上，只跑前 3 条（调试用）；`--json=eval-out.json` 可写出机器可读结果 | 同上 |
+
+> **CI 专属步骤**：`.github/workflows/ci.yml` 的"构建产物校验"（`test -s` + chunk 引用检查）用 bash 编写，
+> 只在 GitHub Actions（ubuntu）上执行；Windows 本地无法复跑同一脚本。本地可跑的是 `npm run lint` / `npm test` / 垫片。
+
+> **vitest 起不来时的替代验证（受限环境专用）**
+>
+> 沙盒 / 杀软实时防护会拦截 esbuild 的子进程（`spawn EPERM`），`npm test` 直接启动失败。
+> 这时可以用 `tools/verify/` 下的最小 vitest 垫片，**不经 esbuild** 直接执行纯逻辑测试文件：
+>
+> ```bash
+> # 先 nvm use 22：本机 PATH 默认可能是 18.12.1，直接跑会报 bad option: --import
+> nvm use 22
+> node --import ./tools/verify/shim-register.mjs tools/verify/run-unit-shim.mjs
+> ```
+>
+> 覆盖 13 个纯逻辑测试文件（agentLoop / runAgent / protocol / contextBudget / devProxy / failureLog /
+> memory / modelLoader / pageReader / swStrategies / tools / toolSchemas / chatWidget），当前为
+> **293 项断言全通过**。不支持 `vi.mock`，所以 `embed` / `tools.handlers` / `devProxy.fallback`
+> 等文件仍需在标准环境跑 `npm test`；垫片结果不能替代正式门禁。
 
 ## 常见问题
 
@@ -120,5 +141,5 @@ npm run dev
 | 端口被占用（5189/8787） | 关闭残留 node 进程后重启（Windows：先 `Get-Process node` 查进程，再用 `Stop-Process` 结束） |
 | 模型答非所问 / 不调工具 | 先确认**当前档位**：0.8B 档的工具调用能力明显弱于 2B（官方自测 BFCL-V4 25.3 vs 43.6、TAU2-Bench 11.6 vs 48.8）。自动推荐在 4 核以上给 2B、12 核以上才给 4B，需要更高能力请在页面下拉里手动切到 4B。此外可调高 `createLocalAgent({ maxSteps })`（默认取 `src/agentLoop.js` 的 `MAX_STEPS = 5`）允许多轮试错 |
 | `npm run dev` 或 `npm test` 直接报错 | 多为 Node 版本过低——Vite 7 要求 **Node ≥ 20.19（或 ≥ 22.12）**，低于该版本会报 `node:fs/promises does not provide an export named 'constants'`。`node -v` 确认后升级 Node |
-| 公网部署代理被刷流量 | 设置环境变量 `PROXY_TOKEN=xxx` 开启令牌校验，所有请求必须带 `X-Proxy-Token: xxx` 头或 `?token=xxx` 查询参数（详见 `server/dev-proxy.mjs` 顶部注释） |
+| 公网部署代理被刷流量 | 设置环境变量 `PROXY_TOKEN=xxx` 开启令牌校验，所有请求必须带 `X-Proxy-Token: xxx` 头（`?token=xxx` 已废弃，仅保留兼容并会打警告）。代理默认只监听 `127.0.0.1`；跨机器调试需显式 `PROXY_HOST=0.0.0.0` 并同时配令牌。跨源场景用 `PROXY_CORS_ORIGINS` 放开（默认只回显本地 origin）。详见 `server/dev-proxy.mjs` 顶部注释 |
 | 离线刷新后页面空白 | Service Worker 注册失败（iframe 嵌入 / 非 HTTPS / SW 路径错误）。DevTools → Application → Service Workers 查看注册状态；首次注册后需**刷新一次**才能完全接管请求 |

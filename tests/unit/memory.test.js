@@ -2,7 +2,7 @@
  * memory.test.js — 记忆系统单元测试（内存适配器）
  */
 import { describe, it, expect } from "vitest";
-import { MemoryStore, createMemoryAdapter } from "../../src/memory.js";
+import { MemoryStore, createMemoryAdapter, createIdbAdapter } from "../../src/memory.js";
 
 async function createStore() {
   const store = new MemoryStore(createMemoryAdapter());
@@ -98,5 +98,27 @@ describe("MemoryStore — 长期记忆", () => {
     expect(keys).not.toContain("key-0");
     expect(keys).not.toContain("key-9");
     expect(keys).toContain("key-109");
+  });
+});
+
+describe("MemoryStore — 库名隔离（#23）", () => {
+  it("默认库名为 local-llm-agent（与旧版本兼容）", () => {
+    expect(createIdbAdapter().dbName).toBe("local-llm-agent");
+    expect(new MemoryStore().adapter.dbName).toBe("local-llm-agent");
+  });
+
+  it("自定义 dbName 透传到适配器（多实例隔离）", () => {
+    const adapter = createIdbAdapter("my-agent");
+    expect(adapter.dbName).toBe("my-agent");
+    const store = new MemoryStore(null, { dbName: "my-agent" });
+    expect(store.adapter.dbName).toBe("my-agent");
+  });
+
+  it("同库名共享适配器实例，不同库名互不共享", () => {
+    expect(new MemoryStore().adapter).toBe(new MemoryStore().adapter);
+    const a = new MemoryStore(null, { dbName: "db-a" });
+    const b = new MemoryStore(null, { dbName: "db-b" });
+    expect(a.adapter).not.toBe(b.adapter);
+    expect(a.adapter).toBe(new MemoryStore(null, { dbName: "db-a" }).adapter);
   });
 });

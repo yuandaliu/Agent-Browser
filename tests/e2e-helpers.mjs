@@ -36,6 +36,31 @@ export async function launchBrowser({ headless = true, extraArgs = [] } = {}) {
   });
 }
 
+/**
+ * launchBrowser 的安全包装：启动失败时给出可读诊断并以退出码 1 结束。
+ *
+ * 为什么需要它：所有 E2E 脚本都是「先 launch，再进 try」的结构，而
+ * Playwright 通过 `--remote-debugging-pipe` 与浏览器通信（需要命名管道权限）。
+ * 在受限环境（沙箱、无命名管道权限的 CI）下，launch 本身就会抛
+ * `browserType.launch: spawn EPERM`——这句在 try 之外，会让脚本以**未捕获异常崩溃**，
+ * 只留下一大段 Playwright 内部 call log，看不出真正原因。
+ *
+ * 用法：把 `launchBrowser(...)` 换成 `await launchBrowserSafe(...)` 即可。
+ */
+export async function launchBrowserSafe(opts) {
+  try {
+    return await launchBrowser(opts);
+  } catch (err) {
+    const msg = err?.message ?? String(err);
+    console.error(`[e2e] 浏览器启动失败: ${msg}`);
+    if (/spawn EPERM|remote-debugging-pipe|create signal pipe/i.test(msg)) {
+      console.error("[e2e] 提示：Playwright 需要命名管道来驱动浏览器，受限环境（沙箱 / 受限 CI）下无法建立。");
+      console.error("[e2e]       请在常规终端里执行本脚本；本机 Chrome / Edge 需已安装。");
+    }
+    process.exit(1);
+  }
+}
+
 /** 收集页面控制台错误、警告与日志 */
 export function collectConsole(page) {
   const errors = [];

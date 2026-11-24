@@ -20,6 +20,7 @@ import { runAgent } from "./agentLoop.js";
 import { initPageWatcher, getPageSnapshot } from "./pageReader.js";
 import { getFailureLog as getFailureLogSingleton } from "./failureLog.js";
 import { buildDecisionSchema } from "./toolSchemas.js"; // 内部使用：toolProtocol "json" 的约束解码 schema
+import { buildPageMetaNotice, clipText, USER_INPUT_BUDGET } from "./contextBudget.js";
 
 export { getModelOptions, getDefaultModelId, getDefaultModelIdAsync, recommendModelId, getAvailableModelOptions, BrowserAI, getPageSnapshot, initPageWatcher };
 export { safeEvaluate } from "./tools.js";
@@ -44,8 +45,11 @@ const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
  *        "json"   —— 约束解码模式：把 buildDecisionSchema() 作为 schema 交给 WebLLM 做 grammar
  *                    约束解码，模型只可能输出符合 schema 的 JSON（最稳，但流式输出内容是 JSON 文本）
  * @param {object} [options.memoryAdapter] 自定义记忆适配器（默认 IndexedDB）
- * @param {boolean} [options.serviceWorker=true] 是否注册 Service Worker（嵌入场景设 false 避免抢占宿主 SW scope）
- * @param {string} [options.swPath="/sw.js"] Service Worker 脚本路径（相对站点根）
+ * @param {boolean} [options.serviceWorker=false] 是否注册 Service Worker（默认关闭）。
+ *        原因：`register("/sw.js")` 的默认 scope 是"脚本所在目录"，根部署即整站——
+ *        嵌入第三方页面时会接管宿主全站的导航与 `/assets/*` 缓存。只有本项目自己的页面
+ *        （index/search/demo）需要离线能力，它们在调用处显式传 `true`。
+ * @param {string} [options.swPath="/sw.js"] Service Worker 脚本路径（仅 serviceWorker 为 true 时生效）
  * @param {string} [options.swScope] Service Worker scope；不传则用浏览器默认（sw.js 所在目录），避免硬编码 "/" 抢占宿主全站
  * @param {(e:{type:string, progress?:number, status?:string, file?:string, modelId?:string, message?:string, error?:Error})=>void} [options.onEvent]
  *        统一事件回调（progress / status / ready / hardware / error）
@@ -63,7 +67,10 @@ export function createLocalAgent(options = {}) {
     maxSteps = 5,
     toolProtocol = "auto",
     memoryAdapter = null,
-    serviceWorker = true, // 是否注册 Service Worker（嵌入场景可设 false 避免抢占宿主 SW scope）
+    dbName, // IndexedDB 库名（多实例隔离；默认 local-llm-agent）
+    // 默认关闭：注册根路径 sw.js 会以整站为 scope，第三方嵌入时等于接管宿主全站缓存。
+    // 本项目自己的页面（src/main.js / search.html / demo/embed-demo.html）显式传 true。
+    serviceWorker = false,
     swPath = "/sw.js", // Service Worker 脚本路径（相对站点根）
     swScope, // Service Worker scope；不传则用浏览器默认（sw.js 所在目录）
     onEvent,
@@ -76,20 +83,35 @@ export function createLocalAgent(options = {}) {
   // 实际生效的模型 ID（auto 由 ready() 决定，否则用用户指定）
   let actualModelId = modelId === "auto" ? null : modelId;
 
+  // 宿主回调是"外部代码"，抛错不能反向毒化内部状态（否则一次 onEvent 异常会让
+  // initPromise 永久 rejected，之后所有 ready()/load()/chat() 都失败）。
+  const safeCall = (fn, arg, label) => {
+    if (typeof fn !== "function") return;
+    try {
+      fn(arg);
+    } catch (err) {
+      console.warn(`[embed] ${label} 回调抛错（已忽略，不影响内部流程）:`, err?.message ?? err);
+    }
+  };
+
   const emit = (event) => {
-    onEvent?.(event);
+    safeCall(onEvent, event, "onEvent");
     switch (event.type) {
       case "progress":
-        onProgress?.({ progress: event.progress, status: event.status, file: event.file, modelId: event.modelId });
+        safeCall(
+          onProgress,
+          { progress: event.progress, status: event.status, file: event.file, modelId: event.modelId },
+          "onProgress",
+        );
         break;
       case "status":
-        onStatus?.(event.message);
+        safeCall(onStatus, event.message, "onStatus");
         break;
       case "ready":
-        onReady?.({ modelId: event.modelId });
+        safeCall(onReady, { modelId: event.modelId }, "onReady");
         break;
       case "error":
-        onError?.(event.error);
+        safeCall(onError, event.error, "onError");
         break;
     }
   };
@@ -117,13 +139,15 @@ export function createLocalAgent(options = {}) {
     webllm: { logLevel: "INFO" },
   });
 
-  let memory = memoryAdapter ? new MemoryStore(memoryAdapter) : new MemoryStore();
+  // dbName 让同一页面的多个 agent 各用各的历史库；不传则沿用默认库名（与旧版本兼容）
+  let memory = memoryAdapter ? new MemoryStore(memoryAdapter) : new MemoryStore(null, { dbName });
   const loader = createModelLoader({ browserAI: ai, onEvent: emit });
   const failureLog = getFailureLogSingleton();
 
   let initialized = false;
   let initPromise = null;
   let chatting = false;
+  let activeChat = null; // 在途对话的 { controller, suppressPersist, done }（clearHistory/abort 依赖）
   let pageWatcher = null;
   let swRegistration = null; // Service Worker registration（best-effort）
   const chatStats = []; // 累计每次 chat 的工具耗时、首 token 延迟等指标（供 getStats 暴露给宿主）
@@ -184,6 +208,11 @@ export function createLocalAgent(options = {}) {
       }
       console.log("[embed] 本地智能体已初始化 ✅");
     })();
+    // 初始化失败必须允许重试：否则 initPromise 永久 rejected，之后所有
+    // ready()/load()/chat() 都抛同一个陈旧错误（且 initialized 仍为 false）。
+    initPromise.catch(() => {
+      initPromise = null;
+    });
     return initPromise;
   }
 
@@ -210,6 +239,9 @@ export function createLocalAgent(options = {}) {
   /**
    * 获取 SDK 目录中实际可加载的模型选项（用 BrowserAI.presets 过滤 MODEL_OPTIONS）。
    * UI 构建模型下拉时应使用本函数，避免展示"选中即 UnknownModelError"的失效档位。
+   *
+   * 注意降级：SDK 未提供目录时返回全部；目录与 MODEL_OPTIONS **零交集**时同样返回全部，
+   * 但那意味着展示出来的档位都不可加载 —— 此时 `getAvailableModelOptions` 会打一次 warn。
    */
   function getAvailableModels() {
     return getAvailableModelOptions(ai?.presets);
@@ -237,16 +269,17 @@ export function createLocalAgent(options = {}) {
    * @returns {Promise<void>}
    */
   async function registerServiceWorker() {
-    // 嵌入场景可设 serviceWorker:false 完全关闭（避免与宿主自有 SW 抢同一 scope）
-    if (serviceWorker === false) return;
+    // serviceWorker 默认 false：注册根路径 sw.js 会以整站为 scope，接管宿主全站。
+    if (serviceWorker !== true) return;
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
-    // scope 默认不传：浏览器用 sw.js 所在目录（根部署时为 "/"，子路径部署且 sw.js 在子路径时自动收缩），
-    // 因此不会默认接管宿主全站；宿主可通过 swScope 显式覆盖。
+    // scope 不显式传时由浏览器按"sw.js 所在目录"决定：根部署 = "/"（**会**接管整站），
+    // 子路径部署 = 子目录。宿主想收紧必须显式传 swScope。
     const registerOpts = swScope !== undefined ? { scope: swScope } : {};
     try {
       swRegistration = await navigator.serviceWorker.register(swPath, registerOpts);
+      // 打印实际 scope（不是猜测值）：这是判断"是否会接管宿主全站"的唯一可靠依据
       console.log(
-        `[embed] Service Worker 已注册 ✅（path=${swPath}，scope=${swScope ?? "默认(sw.js所在目录)"}，激活在后台进行，下次访问生效）`,
+        `[embed] Service Worker 已注册 ✅（path=${swPath}，实际 scope=${swRegistration?.scope ?? swScope ?? "未知"}，激活在后台进行，下次访问生效）`,
       );
       emit({ type: "sw", registered: true });
     } catch (err) {
@@ -268,19 +301,41 @@ export function createLocalAgent(options = {}) {
   async function chat(text, { onStep, onDelta, signal } = {}) {
     if (typeof text !== "string" || !text.trim()) throw new Error("chat: 输入不能为空");
     if (chatting) throw new Error("chat: 已有对话正在进行");
-    // 兼容：即使调用方忘了先 ready()，chat 也应自动兜底（幂等 ready）
-    await ready();
-    if (!loader.getLoadedModelId()) {
-      throw new Error("模型尚未加载，请先调用 load()");
-    }
+    // 单飞守卫必须在任何 await 之前置位：否则同一 tick 内的两次调用
+    // （Promise.all([chat(a), chat(b)])）都能通过检查，两个 ReAct 循环会并发写同一 memory。
     chatting = true;
+
+    // 内部控制器合并宿主 signal：clearHistory()/abort() 需要能中止生成，
+    // 而宿主传入的 signal 只是"外部中止源"，两者必须共用一条中止链路。
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", forwardAbort, { once: true });
+    }
+    let markSettled = null;
+    const entry = {
+      controller,
+      suppressPersist: false, // clearHistory() 置 true：被清理的轮次不得再落库
+      done: new Promise((resolve) => {
+        markSettled = resolve;
+      }),
+    };
+    activeChat = entry;
+
     const chatStartedAt = performance.now();
     try {
+      // 兼容：即使调用方忘了先 ready()，chat 也应自动兜底（幂等 ready）
+      await ready();
+      if (!loader.getLoadedModelId()) {
+        throw new Error("模型尚未加载，请先调用 load()");
+      }
       await memory.addMessage("user", text);
       // 注入当前页面信息（浏览器环境），帮助模型定位"当前页面"类问题
       let systemExtras = "";
       if (typeof document !== "undefined" && typeof location !== "undefined") {
-        systemExtras = `当前所在页面：标题「${document.title}」，网址 ${location.href}。用户可能询问页面内容，需要时可调用 read_page_content 工具读取页面实时内容。`;
+        // 标题/网址可能由宿主页面的用户内容生成 → 走"数据非指令"标注 + 长度上限
+        systemExtras = buildPageMetaNotice({ title: document.title, url: location.href });
       }
       // 工具协议："auto"（默认）时 Qwen 系模型走 chat template 原生协议，其他模型沿用 ReAct 文本协议；
       // 显式传 "react" / "native" / "json" 可覆盖（"json" 为约束解码模式）
@@ -294,11 +349,13 @@ export function createLocalAgent(options = {}) {
       let result;
       try {
         result = await runAgent({
-          userInput: text,
+          // 超长输入单条裁到上限：它同时进入 messages 与工具参数，
+          // 不裁会让一条 user 消息独占整个上下文预算（UI 仍展示原文，历史由 budgetHistory 处理）。
+          userInput: clipText(text, USER_INPUT_BUDGET, { label: "输入已截断" }),
           memory,
           maxSteps,
           systemExtras,
-          signal,
+          signal: controller.signal,
           toolProtocol: protocol,
           // 不传 runtime：让 SDK 完全使用当前加载模型的 preset.defaultRuntime
           // （含 maxTokens / temperature / topP / repetitionPenalty / disableThinking）。
@@ -320,15 +377,17 @@ export function createLocalAgent(options = {}) {
         //   2. 构造占位 result 累积到 stats（让 totalToolFailures / sampleCount 包含异常路径）
         //   3. 重新抛给调用方（UI 层处理展示）
         const isAbort = err?.name === "AbortError" || /abort|中止/i.test(err?.message ?? "");
-        failureLog.record({
-          userInput: text,
-          ok: false,
-          reason: isAbort ? "aborted" : "exception",
-          answer: err?.message ?? String(err),
-          steps: [],
-          rawTexts: [],
-          signalAborted: isAbort,
-        });
+        if (!entry.suppressPersist) {
+          failureLog.record({
+            userInput: text,
+            ok: false,
+            reason: isAbort ? "aborted" : "exception",
+            answer: err?.message ?? String(err),
+            steps: [],
+            rawTexts: [],
+            signalAborted: isAbort,
+          });
+        }
         // 即使异常也累积一次 stats（标记 ok=false, reason="exception" 或 "aborted"）
         recordStats(
           {
@@ -345,31 +404,37 @@ export function createLocalAgent(options = {}) {
         });
         throw err;
       }
+      // 落库前检查 suppressPersist：clearHistory() 已把这轮判为"被清理"，
+      // 此时再写占位就会在空历史里留下一条没有对应 user 的孤儿 assistant 消息。
       if (result.ok !== false) {
         // 成功的回答落库到 IndexedDB 持久化历史（addMessage 失败仅 warn，不阻断对话）
-        try {
-          await memory.addMessage("assistant", result.answer);
-        } catch (err) {
-          console.warn("[embed] 落库 assistant 失败:", err?.message ?? err);
+        if (!entry.suppressPersist) {
+          try {
+            await memory.addMessage("assistant", result.answer);
+          } catch (err) {
+            console.warn("[embed] 落库 assistant 失败:", err?.message ?? err);
+          }
         }
       } else {
-        // 失败对话（aborted / loop / max_steps / error）：
+        // 失败对话（aborted / loop / max_steps / error / unparsed）：
         //   1. 落库 assistant（占位如"（已中止）"），保持历史连贯（否则下次 chat 会看到孤儿 user 消息）
         //   2. 记到 failureLog（localStorage，最近 20 条），便于调试
         // 关键：addMessage 包 try/catch，避免 IndexedDB 满等异常导致 failureLog.record 丢失。
-        try {
-          await memory.addMessage("assistant", result.answer);
-        } catch (err) {
-          console.warn("[embed] 失败对话落库 assistant 失败:", err?.message ?? err);
+        if (!entry.suppressPersist) {
+          try {
+            await memory.addMessage("assistant", result.answer);
+          } catch (err) {
+            console.warn("[embed] 失败对话落库 assistant 失败:", err?.message ?? err);
+          }
+          failureLog.record({
+            userInput: text,
+            ok: false,
+            reason: result.reason,
+            answer: result.answer,
+            steps: result.steps,
+            rawTexts: result.rawTexts,
+          });
         }
-        failureLog.record({
-          userInput: text,
-          ok: false,
-          reason: result.reason,
-          answer: result.answer,
-          steps: result.steps,
-          rawTexts: result.rawTexts,
-        });
       }
       // 性能埋点：累积本次 chat 的指标
       const stats = recordStats(result, chatStartedAt);
@@ -377,12 +442,39 @@ export function createLocalAgent(options = {}) {
       return result;
     } finally {
       chatting = false;
+      if (activeChat === entry) activeChat = null;
+      markSettled(); // 唤醒 clearHistory() 的等待
+      if (signal) signal.removeEventListener("abort", forwardAbort);
     }
+  }
+
+  /** 中止当前对话（宿主"停止"按钮可直接调用）。@returns {boolean} 是否有在途对话被中止 */
+  function abort() {
+    const active = activeChat;
+    if (!active) return false;
+    active.controller.abort();
+    return true;
   }
 
   // ---- 记忆直通接口（宿主页面可直接读写） ----
   const getHistory = () => memory.getHistory();
-  const clearHistory = () => memory.clearHistory();
+  /**
+   * 清空对话历史。
+   *
+   * 与记忆 store 的 clearHistory 不同：这里会先中止在途对话并等它落地，再清库。
+   * 否则被中止的轮次会在清库之后写入"（已中止）"占位，留下没有对应 user 的孤儿
+   * assistant 消息（下一轮 getRecent(8) 会把它注入上下文）。
+   */
+  async function clearHistory() {
+    const active = activeChat;
+    if (active) {
+      active.suppressPersist = true;
+      active.controller.abort();
+      // 与 chatWidget 侧一致：模型异常卡死时不能让宿主的"新对话"永久挂起
+      await Promise.race([active.done, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+    }
+    return memory.clearHistory();
+  }
   const getMemories = () => memory.getMemories();
   const saveMemory = (key, value) => memory.saveMemory(key, value);
   const recallMemory = (query) => memory.recall(query);
@@ -492,8 +584,9 @@ export function createLocalAgent(options = {}) {
     await loader.unload();
   }
 
-  /** 完全销毁：卸载模型、停止页面监听并移除事件监听 */
+  /** 完全销毁：中止在途对话、卸载模型、停止页面监听并移除事件监听 */
   async function dispose() {
+    abort(); // 先中止生成，避免卸载后仍有 generate 在跑
     await loader.unload();
     pageWatcher?.dispose();
     pageWatcher = null;
@@ -506,6 +599,7 @@ export function createLocalAgent(options = {}) {
     unload,
     dispose,
     chat,
+    abort,
     isModelLoaded,
     getLoadedModelId,
     getRecommendedModelId,

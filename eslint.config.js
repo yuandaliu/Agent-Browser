@@ -19,7 +19,6 @@ export default [
       "dist-embed/",
       "coverage/",
       "*.esm.js",
-      "public/",
     ],
   },
   js.configs.recommended,
@@ -108,6 +107,27 @@ export default [
         console: "readonly",
         globalThis: "readonly",
       },
+    },
+  },
+  {
+    // Service Worker（public/sw.js）：此前被整体 ignore，149 行生产代码零 lint 覆盖。
+    // 它同时是唯一无法被单测执行的文件，所以更依赖静态检查。
+    files: ["public/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "script", // SW 不使用 ESM import（见文件头说明）
+      globals: {
+        self: "readonly",
+        caches: "readonly",
+        clients: "readonly",
+        Response: "readonly",
+        fetch: "readonly",
+        URL: "readonly",
+        console: "readonly",
+      },
+    },
+    rules: {
+      "no-unused-vars": "warn",
     },
   },
 ];

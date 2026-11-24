@@ -128,6 +128,8 @@
       let maxProgress = 0;
 
       const agent = createLocalAgent({
+        // 本页模拟"第三方宿主站点"：故意不传 serviceWorker（默认 false），
+        // 演示嵌入方不会接管宿主全站的 SW scope。真实宿主若需要离线，再显式 serviceWorker:true。
         onEvent: (event) => {
           switch (event.type) {
             case "hardware": {

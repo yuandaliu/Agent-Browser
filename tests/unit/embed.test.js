@@ -407,3 +407,110 @@ describe("createLocalAgent — proxyOrigin 本地默认", () => {
     expect(browserAICall.proxyOrigin).toBe("https://my-app.vercel.app");
   });
 });
+
+describe("createLocalAgent — 并发与生命周期（#3 #4 #21）", () => {
+  /** 让 generateText 挂起直到被 abort（模拟真实的长生成） */
+  function makePendingGenerate(ai) {
+    ai.generateText = vi.fn(
+      (messages, { signal } = {}) =>
+        new Promise((_resolve, reject) => {
+          const fail = () => {
+            const err = new Error("用户已中止对话");
+            err.name = "AbortError";
+            reject(err);
+          };
+          if (signal?.aborted) fail();
+          else signal?.addEventListener("abort", fail, { once: true });
+        }),
+    );
+  }
+
+  it("并发 chat：同一 tick 的第二次调用必被拒绝（守卫必须在 await 之前置位）", async () => {
+    const agent = createLocalAgent();
+    await agent.load("Qwen3.5-2B-q4f16_1-MLC");
+    makePendingGenerate(BrowserAIMock.mock.results.at(-1).value);
+
+    const first = agent.chat("第一次");
+    // 不要 await：立刻发起第二次（旧实现会两个都通过守卫）
+    const second = agent.chat("第二次");
+    await expect(second).rejects.toThrow(/已有对话正在进行/);
+
+    agent.abort();
+    await first;
+  });
+
+  it("abort() 返回是否命中，并让在途对话以 aborted 收尾", async () => {
+    const agent = createLocalAgent();
+    await agent.load("Qwen3.5-2B-q4f16_1-MLC");
+    makePendingGenerate(BrowserAIMock.mock.results.at(-1).value);
+
+    expect(agent.abort()).toBe(false); // 无在途对话
+
+    const pending = agent.chat("在途");
+    await Promise.resolve();
+    expect(agent.abort()).toBe(true);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("aborted");
+  });
+
+  it("clearHistory() 先中止在途对话，且不落库 assistant 占位（避免孤儿消息）", async () => {
+    const agent = createLocalAgent();
+    await agent.load("Qwen3.5-2B-q4f16_1-MLC");
+    makePendingGenerate(BrowserAIMock.mock.results.at(-1).value);
+
+    memoryInstance.addMessage.mockClear();
+    const pending = agent.chat("在途");
+    await Promise.resolve();
+    await agent.clearHistory();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(memoryInstance.clearHistory).toHaveBeenCalledTimes(1);
+    const roles = memoryInstance.addMessage.mock.calls.map((c) => c[0]);
+    expect(roles).toContain("user");
+    // 关键断言：清库之后不得再写入"（已中止）"占位
+    expect(roles).not.toContain("assistant");
+  });
+
+  it("宿主回调抛错不阻断初始化（emit 内部隔离，避免 initPromise 永久 rejected）", async () => {
+    const agent = createLocalAgent({
+      onEvent: () => {
+        throw new Error("宿主 onEvent 炸了");
+      },
+    });
+    await expect(agent.ready()).resolves.toBeUndefined();
+  });
+});
+
+describe("createLocalAgent — Service Worker 默认行为（#8）", () => {
+  async function withNavigator(value, fn) {
+    vi.stubGlobal("navigator", value);
+    try {
+      await fn();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("默认不注册 SW：嵌入方不会接管宿主全站 scope", async () => {
+    const register = vi.fn(async () => ({ scope: "https://host.example/" }));
+    await withNavigator({ serviceWorker: { register } }, async () => {
+      const agent = createLocalAgent();
+      await agent.ready();
+      expect(register).not.toHaveBeenCalled();
+      expect(agent.getSWRegistration()).toBeNull();
+    });
+  });
+
+  it("显式 serviceWorker:true 才注册，并暴露实际 scope", async () => {
+    const register = vi.fn(async () => ({ scope: "https://host.example/" }));
+    await withNavigator({ serviceWorker: { register } }, async () => {
+      const agent = createLocalAgent({ serviceWorker: true, swPath: "/sw.js" });
+      await agent.ready();
+      expect(register).toHaveBeenCalledWith("/sw.js", {});
+      expect(agent.getSWRegistration()).toEqual({ scope: "https://host.example/" });
+    });
+  });
+});

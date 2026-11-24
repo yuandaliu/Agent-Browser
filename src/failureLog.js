@@ -81,8 +81,17 @@ export class FailureLog {
       const enriched = {
         timestamp: Date.now(),
         ...entry,
-        // 容量保护：steps / rawTexts 裁剪后再入库，
-        // 避免步骤原文（每步可达数千字符）累积撑爆 localStorage 5MB 配额
+        // 容量保护：**所有**自由文本字段都要裁剪后再入库。
+        // 旧实现只裁 steps / rawTexts，userInput 与 answer 原样写入——20 条超长输入
+        // 就能顶满 localStorage 5MB 配额，之后所有写入静默失败（失败日志在最需要时失效）。
+        userInput:
+          typeof entry.userInput === "string" && entry.userInput.length > MAX_FAILURE_TEXT
+            ? clipText(entry.userInput, MAX_FAILURE_TEXT, { label: "输入已截断" })
+            : entry.userInput,
+        answer:
+          typeof entry.answer === "string" && entry.answer.length > MAX_FAILURE_TEXT
+            ? clipText(entry.answer, MAX_FAILURE_TEXT, { label: "回答已截断" })
+            : entry.answer,
         steps: sanitizeSteps(entry.steps),
         rawTexts: sanitizeRawTexts(entry.rawTexts),
       };

@@ -311,7 +311,7 @@ SDK 自带 **47 个 preset**，项目只用了 3 个（Qwen3.5 0.8B/2B/4B）。�
 | ~~双重缓存导致占用翻倍（§2.2 #1）~~ **已修复**（A1，`9ca6342`） | 逻辑推断（两处缓存键与写入路径均已核对） | 已消除：SW 不再拦截模型路径，模型缓存唯一在 SDK 侧。**遗留一项待真机确认**：`ROADMAP` P1-A 的"离线回归"——"SDK 缓存命中后不再发起 fetch"这一推断本身仍未实测 |
 | `resetChat: false` 能复用 KV 从而加速多步循环（§2.2 #7） | 推断，依赖 WebLLM 的消息前缀 diff 行为 | 同一问题在两种设置下对比 `getStats().avgTotalMs` |
 | contextLength 上调到 8192 的显存代价 | 未测 | 在 4B 档看 `probeHardware` 的 limits 与实测是否 OOM |
-| **MLC `max_history_size: 1` 的语义**（Qwen3.5 各档的 overrides 都带该字段） | **未查到权威说明**——若其含义是"KV cache 只保留最近 1 轮"，则 `MAX_HISTORY_MESSAGES = 8` 本就进不去模型，这才是"聊着聊着忘了要求"的真因，且优先级高于 A6 | 查 WebLLM/MLC 源码或文档；或用一次带明显早期信息的对话做黑盒验证 |
+| ~~**MLC `max_history_size: 1` 的语义**~~ **已查明（2026-10-15）** | **原猜测被证伪**：它不是 KV cache，也不是对话历史保留数。WebLLM 源码里该值**只**用于 `create_rnn_state`（`@mlc-ai/web-llm/lib/index.js:9992-9995`，整段包在 `if (resolvedModelABI.needsRNNState)` 内）——即 **RNN 类模型（Mamba / RWKV）的递归状态形状**。Qwen3.5 是 Transformer，走 `createKVCache`（同文件 `:9986`），**该字段对对话历史毫无影响** | 无需再验。所以"聊着聊着忘了要求"的真因应回到项目自身的裁剪——`MAX_HISTORY_MESSAGES = 8` + 每条 500 字符；而 KV cache 容量由 `context_window_size`（即 `LoadOptions.contextLength`）决定，那才是 A6 该动的旋钮 |
 | WebMCP 的稳定性与跨引擎性 | Origin Trial（Chrome 149 / Edge 150）；**WebKit `oppose`（#670）、Mozilla `neutral`（#1412）**；规范为 W3C CG Draft，不在 Standards Track | 必须特性检测 + 降级；不要在默认路径上依赖它；用 `document.modelContext` 而非 `navigator.modelContext` |
 | Prompt API 的版本与平台覆盖 | **规范一手来源已取得**（`tools` / `responseConstraint` / `availability()` 均已写入），但 **Chrome/Edge 的具体版本、stable 状态、Windows/macOS/Linux/Android 覆盖未能核验**（官方域被网络策略拦截） | 落地 D5 前需人工在可访问网络复核；实现上只依赖 `availability()`，不假设版本 |
 | Qwen3.5 的 agent 分数（BFCL-V4 43.6/25.3、TAU2 48.8/11.6） | **厂商自测**（来自官方模型卡），非第三方榜单复现 | 用 D4 的本地评测基线在自己的用例上复核，再据此改档位策略 |
@@ -320,6 +320,47 @@ SDK 自带 **47 个 preset**，项目只用了 3 个（Qwen3.5 0.8B/2B/4B）。�
 | 本地/端侧 AI 的市场规模预测 | 未找到权威原始报告 | 已改用可核查的替代数据（GitHub star、官方定价页、Menlo 支出数据） |
 | 本机 `npm test` 无法运行 | 环境问题（Node 16.14.1 < vite 7 要求）。**已缓解并确认**：`package.json` 补 `engines`（`^20.19.0 \|\| >=22.12.0`）+ `.nvmrc`（22）；本机已切至 Node **22.23.2** | **已完成**（2026-10-15）：`npm test` = 312 passed / 21 files，`npm run lint` = 0 问题 |
 | **文档改动的正确性** | 所有修改均基于代码/配置/产物的一手核对（含实测 `dist-embed` 体积与 gzip）；原「未能在本机跑测试验证」的限制已随 Node 22.23.2 解除 | **已完成**（2026-10-15）：`npm test` = 312 passed、`npm run lint` = 0 问题；`INTEGRATION.md` 的产物体积数字与新增构造参数已随之复核 |
+
+---
+
+## 6. 2026-11 补盲轮（第二轮代码级审阅）
+
+> 触发：2026-11-17。方法：通读 `src/` 全部 12 个 JS、`public/sw.js`、`server/dev-proxy.mjs`、
+> 构建/部署/CI 配置、`INTEGRATION.md` 契约段与 `tests/unit` 全部用例；**不重复** §2.2 的 12 条。
+> 结论：**P0 × 0 · P1 × 8 · P2 × 20**，P1 集中在三个簇——代理安全、并发与生命周期、预算与注入。
+
+### 6.1 本轮处理（已实施，部分仅补告警）
+
+| 簇 | 条目 | 落点 |
+| --- | --- | --- |
+| 代理安全 | SSRF（盲目跟随 3xx）· 默认监听全部网卡 + `ACAO:*` · 令牌非恒定时间比较 · `..` 路径逃逸 | `server/dev-proxy.mjs` |
+| 并发与生命周期 | `chat` 单飞守卫在 `await` 之后置位（TOCTOU）· `clear()` 产生孤儿 assistant 消息 · `initPromise` 永久 rejected · SW 默认接管宿主全站 | `src/embed.js`、`src/chatWidget.js` |
+| 预算与注入 | 四类分项预算叠加可造 1.5 万字符（远超 4096 window）· `document.title` 无标注进 system prompt · 缓存分支忽略 `maxChars` · 隐藏文本被读入 · 非法选择器直接失败 | `src/contextBudget.js`、`src/agentLoop.js`、`src/pageReader.js` |
+| 解析与失败语义 | thinking 段末无换行导致推理段内 `tool_call` 被执行 · 裸值参数并入 `Final` 正文 · 解析失败被静默记成功 · 循环检测键序敏感 · 业务失败仍 `ok:true` | `src/agentLoop.js`、`src/tools.js` |
+| 记忆与日志 | 记忆按主键字典序装箱（最新事实可能被丢）· 失败日志 `userInput/answer` 无上限 · 多实例共享同一库 | `src/contextBudget.js`、`src/failureLog.js`、`src/memory.js` |
+| 门禁 | `coverage.thresholds` **曾写在顶层被静默忽略**；默认口径把 `dist-embed/` 打包产物算进分母（总量被稀释到 6.82%）· 构建门禁只查两个文件名 · `public/sw.js` 被 lint 忽略 · `chat` 失败语义未入契约 | `vitest.config.js`、`ci.yml`、`eslint.config.js`、`INTEGRATION.md`。**2026-11-24 已修**：配置移入 `test.coverage` + 只统计 `src`/`server`，阈值按实测 −3% 设为 81/81/79/77，并反向验证可拦截（exit 1） |
+
+> 注：表中诸项均已落地，但 **#8 的 SW 缓存策略与 #22 的返回形态刻意未改**——前者只调整了
+> "谁默认注册 SW"，后者只补了一条告警（返回列表形态不变）。原因见 §6.3，不要据此认为两项已改完。
+
+### 6.2 与上一轮结论的三处修正（外部环境变化）
+
+1. **WebLLM 已到 v0.2.88（2026-11-10）**，且 0.2.87 明确修了 **"Fix JSON schema generation for Qwen3.5"**
+   （0.2.88 又修了流式补全的 prompt echo）。项目锁的是 0.2.84 —— `json` 约束解码协议的收益可能被上游 bug 吃掉。
+   建议：以 `overrides` 试升到 ≥0.2.87，用评测基线验证后再定。
+2. **Chrome Prompt API 已 stable（Chrome 148+，桌面）**，但原生 `tools` 在 stable 上**未核实生效**
+   （生态普遍反馈"接受参数但静默无效"）。因此 §3 的 D5 应改为"仅作生成后端 + 复用本项目工具编排"，
+   且其 4K 输入窗口不足以承载 ReAct 循环 —— 定位从"替代"降为"零下载短问答快路径"。
+3. **WebMCP 的 Origin Trial 于 2026-11-17 到期**（从未 shipped，规范仍是 CG Draft）。
+   §3 C1 的"现在做正好卡在窗口期"已过期：应降级为"特性探测 + 最小适配器 + 演示页自带一个工具"，不排主线。
+
+### 6.3 本轮未做（附理由）
+
+- **#8 的 SW 策略本身**：只改了调用方默认值，`VERSION` 不动（缓存策略未变，递增会让用户误以为需要重下）。
+- **#22 `getAvailableModels()` 零交集形态**：返回形态保持"回退全部"（改成空列表会让宿主下拉直接空白，
+  属产品取舍而非缺陷）；但**告警已补**（2026-11-17）——原实现只有回退、没有 `console.warn`，与本节原描述不符，
+  现在零交集会明确提示"配置/版本脱节"。若将来宿主确实需要严格列表，再加 `{ strict: true }` 选项。
+- **上一轮批次 B/C/D**（多模态 / 语音 / WebMCP / OPFS / SRI）：与本轮的实现缺陷无关，维持原排期。
 
 ---
 

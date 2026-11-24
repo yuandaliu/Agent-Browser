@@ -11,6 +11,7 @@ import {
   stripThinking,
   parseToolCallXml,
   extractJsonToolCall,
+  looksLikeToolAttempt,
 } from "../../src/agentLoop.js";
 
 describe("extractFinal — 提取最终答案", () => {
@@ -79,7 +80,7 @@ describe("parseReActOutput — ReAct 输出解析", () => {
 
   it("Final 优先于未知 Action", () => {
     const parsed = parseReActOutput("Thought: 不知道\nAction: unknown_tool\nAction Input: {}\nFinal: 直接回答");
-    expect(parsed.type).toBe("unknown");
+    expect(parsed.type).toBe("final");
     expect(parsed.text).toContain("直接回答");
   });
 
@@ -89,10 +90,15 @@ describe("parseReActOutput — ReAct 输出解析", () => {
     expect(parsed.text).toBe("现在是下午 3 点");
   });
 
-  it("无格式内容 → unknown（当作直接回答）", () => {
+  it("无格式内容 → final（当作直接回答，不算解析失败）", () => {
     const parsed = parseReActOutput("你好呀");
-    expect(parsed.type).toBe("unknown");
+    expect(parsed.type).toBe("final");
     expect(parsed.text).toBe("你好呀");
+  });
+
+  it("有工具痕迹却解析不出 → unparsed（算失败，避免静默记成功）", () => {
+    const parsed = parseReActOutput("Action: 我想调工具但忘了写名字");
+    expect(parsed.type).toBe("unparsed");
   });
 
   it("Thought 中提及 action 单词不会误判", () => {
@@ -456,5 +462,52 @@ describe("runAgent — ReAct 循环", () => {
     });
     expect(captured.some((m) => m.role === "user" && m.content === "我叫小明")).toBe(true);
     expect(captured.some((m) => m.role === "system")).toBe(true);
+  });
+});
+
+describe("stripThinking — 换行脆弱性（#12）", () => {
+  it("推理段末尾没有换行时仍能剥离", () => {
+    // 旧实现把 <|/thinking|> 替换成 "response\n"，前面不补换行 → 正则匹配失败
+    const out = stripThinking("thinking\n分析中。<|/thinking|>\nFinal: 好的");
+    expect(out).toBe("Final: 好的");
+  });
+
+  it("推理段内含 tool_call 时不会把它当成真实调用", () => {
+    const text =
+      "thinking\n<tool_call><function=calculate><parameter=expression>1+1</parameter></function></tool_call><|/thinking|>\nFinal: 直接回答";
+    const parsed = parseReActOutput(text);
+    expect(parsed.type).toBe("final");
+    expect(parsed.text).toBe("直接回答");
+  });
+
+  it("<think> 标签变体同样处理", () => {
+    expect(stripThinking("thinking\n推理。\n</think>\nFinal: 结果")).toBe("Final: 结果");
+  });
+});
+
+describe("extractActionInput — 裸值截断（#13）", () => {
+  it("裸值后跟 Final 时不把 Final 正文并入参数", () => {
+    const parsed = parseReActOutput("Action: web_search\nAction Input: 北京天气\nFinal: 好的");
+    expect(parsed.type).toBe("action");
+    expect(parsed.input.input).toBe("北京天气");
+  });
+
+  it("裸值后跟其他标记同样截断", () => {
+    const parsed = parseReActOutput("Action: web_search\nAction Input: 上海天气\nThought: 再想想");
+    expect(parsed.input.input).toBe("上海天气");
+  });
+});
+
+describe("looksLikeToolAttempt — 工具意图识别（#14）", () => {
+  it("识别 Action 行 / tool_call / JSON action 字段", () => {
+    expect(looksLikeToolAttempt("Action: calculate")).toBe(true);
+    expect(looksLikeToolAttempt("<tool_call>…")).toBe(true);
+    expect(looksLikeToolAttempt('{"action":"calculate"}')).toBe(true);
+  });
+
+  it("普通文本不算工具意图", () => {
+    expect(looksLikeToolAttempt("你好，我是本地智能体")).toBe(false);
+    expect(looksLikeToolAttempt("Final: 答案")).toBe(false);
+    expect(looksLikeToolAttempt("")).toBe(false);
   });
 });

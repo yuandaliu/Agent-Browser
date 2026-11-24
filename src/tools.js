@@ -405,9 +405,19 @@ export function toolsDescription() {
 }
 
 /**
+ * handler 用字符串表达业务失败的历史约定（"计算失败：…" / "搜索失败：…" 等）。
+ * 这些不是"正常返回"：必须计入 ok:false，否则 getStats().toolFailures 与失败归因
+ * 会长期偏低，用 getStats() 对比工具失败率的验收方式也会被污染（REVIEW-2026-11 #17）。
+ */
+const FAILURE_TEXT_RE = /^(?:计算|搜索|记忆|读取)失败[：:]|^工具执行出错[：:]|^未知工具[：:]/;
+
+/**
  * 执行工具。ctx 提供记忆 store。统一返回对象形式的观察结果 + 性能埋点。
  * 任何异常都 catch 成 {ok: false, errorMessage} 形态（绝不向模型抛出 JS 异常）。
  * 调用方（agentLoop）解包 toolResult.text 拼回消息。
+ *
+ * handler 可返回纯字符串（历史写法，按 FAILURE_TEXT_RE 推断成败），
+ * 也可返回 `{ ok, text, errorMessage }` 显式标记（新工具推荐后者）。
  *
  * @param {string} name 工具名
  * @param {object} input 工具参数对象（与 JSON Schema 校验过的形态）
@@ -429,10 +439,20 @@ export async function runTool(name, input, ctx = {}) {
   const rawInput = (typeof input === "string" ? input : arg("input")) ?? undefined;
   try {
     const result = await tool.handler(input, ctx, { arg, rawInput });
+    const durationMs = Math.round((performance.now() - startedAt) * 100) / 100;
+    const explicit =
+      result && typeof result === "object" && Object.prototype.hasOwnProperty.call(result, "text")
+        ? result
+        : null;
+    const text = explicit ? explicit.text : result;
+    const textStr = String(text ?? "");
+    const ok =
+      explicit && typeof explicit.ok === "boolean" ? explicit.ok : !FAILURE_TEXT_RE.test(textStr);
     return {
-      text: result,
-      durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
-      ok: true,
+      text,
+      durationMs,
+      ok,
+      ...(ok ? {} : { errorMessage: explicit?.errorMessage ?? textStr.slice(0, 200) }),
     };
   } catch (err) {
     return {

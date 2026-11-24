@@ -14,15 +14,16 @@
     "build": "vite build",
     "build:embed": "vite build --config vite.embed.config.js",
     "preview": "vite preview",
-    "lint": "eslint src tests server",
-    "precommit": "eslint src tests server --max-warnings=0",
+    "lint": "eslint src tests server public",
+    "precommit": "eslint src tests server public --max-warnings=0",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "node tests/e2e.mjs",
     "test:probe": "node tests/e2e-probe.mjs",
     "test:embed": "node tests/e2e-embed-probe.mjs",
     "test:search": "node tests/e2e-search-probe.mjs",
-    "test:offline": "node tests/e2e-offline.mjs"
+    "test:offline": "node tests/e2e-offline.mjs",
+    "test:eval": "node tests/eval-agent.mjs"
   },
   "dependencies": {
     "@missionsquad/browserai": "^0.1.0"

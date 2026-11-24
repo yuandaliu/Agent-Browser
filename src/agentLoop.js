@@ -29,6 +29,7 @@ import {
   budgetObservation,
   budgetHistory,
   clipText,
+  fitMessages,
   SYSTEM_PROMPT_BUDGET,
   SYSTEM_EXTRAS_BUDGET,
   SYSTEM_MEMORY_FALLBACK_BUDGET,
@@ -208,13 +209,16 @@ export function stripThinking(text) {
   const normalized = String(text)
     .replace(/^\s*<\|im_start\|>assistant\s*/i, "")
     .replace(/<\|thinking\|>/gi, "thinking\n")
-    .replace(/<\|\/thinking\|>/gi, "response\n")
+    // 前面补 \n：正则要求"thinking 行 → 换行 → … → 换行 → response"。
+    // 若推理段末尾没有换行，只写 "response\n" 会让匹配失败、原文返回，
+    // 于是推理段里的 <tool_call> 会被后续解析当成真实工具调用执行。
+    .replace(/<\|\/thinking\|>/gi, "\nresponse\n")
     // Qwen3.5 / Qwen3 的 chat template 用标准 XML 标签包裹推理段（<think>…</think>，见
     // enable_thinking 分支），与 <|thinking|> 特殊 token 是两套写法，这里一并归一为
     // thinking/response 标记，复用下方同一正则。
     .replace(/<\s*think\s*>/gi, "thinking\n")
-    .replace(/<\s*\/\s*think\s*>/gi, "response\n");
-  const m = normalized.match(/^\s*thinking\s*\n[\s\S]*?\n\s*response\s*\n?([\s\S]*)$/i);
+    .replace(/<\s*\/\s*think\s*>/gi, "\nresponse\n");
+  const m = normalized.match(/^\s*thinking\s*\n[\s\S]*?\n*\s*response\s*\n?([\s\S]*)$/i);
   if (m) {
     const rest = m[1].trimStart();
     // response 段为空时保守返回原文（推理段里可能已含工具调用，交给后续解析路径）
@@ -259,8 +263,9 @@ function extractActionInput(text) {
   if (idx === -1) return null;
 
   let rest = normalized.slice(idx).replace(/^Action\s+Input\s*:\s*/i, "");
-  // 截断到下一个格式标记
-  rest = rest.replace(/\n\s*(?:Thought|Observation|Final)\s*:/i, "").trim();
+  // 截断到下一个格式标记。用 split 而不是 replace：replace 只删掉标记本身、
+  // 会把其后的正文留下——裸值输入时 "Final: 好的" 会被并进工具参数。
+  rest = rest.split(/\n\s*(?:Thought|Observation|Final)\s*:/i)[0].trim();
 
   // JSON 对象块（含嵌套括号）
   if (rest.startsWith("{")) {
@@ -285,6 +290,19 @@ function extractActionInput(text) {
   }
   // 裸值（如 {"expression"} 之外的裸字符串）
   return rest || null;
+}
+
+/**
+ * 文本里是否出现"工具调用意图"的痕迹。
+ *
+ * 用途：区分两种"解析不出 action"的情况——
+ *   - 模型压根没打算调工具（纯文本回答）→ 应算成功，绝不能计入失败率；
+ *   - 想调工具但格式坏了（缺 Input / 工具名未注册 / JSON 截断）→ 必须算失败，
+ *     否则解析器的所有缺陷都会被静默记成成功，`getStats()` 与评测基线全部失真。
+ */
+export function looksLikeToolAttempt(text) {
+  const s = String(text ?? "");
+  return /Action\s*[:：]/i.test(s) || /<tool_call/i.test(s) || /"action"\s*:/i.test(s);
 }
 
 /**
@@ -370,10 +388,12 @@ export function extractJsonToolCall(text) {
 
 /**
  * 解析模型的 ReAct 输出。
- * @returns {{type:"action", name:string, input:any} | {type:"final", text:string} | {type:"unknown", text:string}}
+ * @returns {{type:"action", name:string, input:any}
+ *          | {type:"final", text:string}
+ *          | {type:"unparsed", text:string}} unparsed = "有工具意图但解析失败"
  */
 export function parseReActOutput(text) {
-  if (!text || typeof text !== "string") return { type: "unknown", text: String(text ?? "") };
+  if (!text || typeof text !== "string") return { type: "unparsed", text: String(text ?? "") };
 
   // 0) Qwen3 / Qwen3.5 等 thinking 模型：剥离 "thinking…response" 推理段，只解析实际回复
   const core = stripThinking(text);
@@ -419,14 +439,19 @@ export function parseReActOutput(text) {
       if (input !== null) return { type: "action", name, input };
       // 有 Action 但无 Input：尝试用空参数（get_current_time 等无参工具）
       if (name === "get_current_time") return { type: "action", name, input: {} };
-      return { type: "unknown", text: final ?? core.trim() };
+      // 有 Action 但格式不全：若模型同时给了 Final，说明它已经能回答 → 用 Final；
+      // 否则判"工具意图解析失败"（不是正常回答，否则解析缺陷会被静默记成成功）。
+      return final ? { type: "final", text: final } : { type: "unparsed", text: core.trim() };
     }
-    // Action 名未知 → 若同时有 Final 优先用 Final，否则原样输出
-    return { type: "unknown", text: final ?? core.trim() };
+    // Action 名未知（不在注册表）：有 Final 用 Final，否则同样判解析失败
+    return final ? { type: "final", text: final } : { type: "unparsed", text: core.trim() };
   }
 
   if (final) return { type: "final", text: final };
-  return { type: "unknown", text: core.trim() };
+  // 无任何工具痕迹 → 纯文本回答；有痕迹却解析不出 → unparsed
+  return looksLikeToolAttempt(core)
+    ? { type: "unparsed", text: core.trim() }
+    : { type: "final", text: core.trim() };
 }
 
 /**
@@ -488,6 +513,14 @@ export function parseStructuredDecision(text) {
 // ReAct 循环
 // ---------------------------------------------------------------------------
 
+/** 按键名排序的稳定序列化：只用于"循环检测的键"，不参与传输与解析 */
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+}
+
 /**
  * 运行一轮智能体对话。
  * @param {object} opts
@@ -504,7 +537,8 @@ export function parseStructuredDecision(text) {
  * @param {"react"|"native"|"json"} [opts.toolProtocol="react"] 工具调用协议（默认 react）：
  *        react 用自创文本格式；native 用 Qwen chat template 原生 XML 协议；
  *        json 期望模型输出单个决策 JSON（通常配合约束解码，见 parseStructuredDecision）
- * @returns {Promise<{answer:string, rawTexts:string[], steps:object[]}>}
+ * @returns {Promise<{answer:string, rawTexts:string[], steps:object[], ok?:boolean, reason?:string}>}
+ *          ok=false 的 reason 取值：aborted / error / loop / max_steps / unparsed
  */
 export async function runAgent({ userInput, memory, generate, onStep = () => {}, maxSteps = MAX_STEPS, systemExtras = "", signal, toolProtocol = "react" }) {
   // 协议归一化：非白名单取值一律回退 react，避免宿主传错值时提示词与解析不匹配
@@ -540,11 +574,13 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     history = [];
   }
   const budgetedHistory = budgetHistory(history);
-  const messages = [
+  // 总量预算：上面的分项裁剪只保证"单条不超"，叠加后仍可能远超模型 context（#5）。
+  // 这里做一次总量收敛，并在每步追加 Observation 后复检（见循环内）。
+  let messages = fitMessages([
     { role: "system", content: system },
     ...budgetedHistory.map((m) => ({ role: m.role, content: m.content })),
     { role: "user", content: userInput },
-  ];
+  ]);
 
   let previousActionKey = null; // 死循环检测
   let actionRepeatCount = 0;
@@ -589,8 +625,10 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
     emit({ type: "raw", text });
 
     if (parsed.type === "action") {
-      // 死循环检测：连续相同 action（第 2 次重复注入换工具引导，第 3 次终止）
-      const actionKey = `${parsed.name}:${JSON.stringify(parsed.input)}`;
+      // 死循环检测：连续相同 action（第 2 次重复注入换工具引导，第 3 次终止）。
+      // 键用"工具名 + 按键排序的稳定序列化"：否则同一调用换个键序就能绕过检测。
+      // 注意：交替调用（A→B→A→B）不在此检测范围，由 maxSteps 兜底。
+      const actionKey = `${parsed.name}:${stableStringify(parsed.input)}`;
       if (actionKey === previousActionKey) {
         actionRepeatCount++;
       } else {
@@ -666,10 +704,21 @@ export async function runAgent({ userInput, memory, generate, onStep = () => {},
             ? `Observation: ${observationBody}`
             : `<tool_response>\n${observationBody}\n</tool_response>`,
       });
+      // 每步追加后复检总量：多步工具调用是 context 膨胀的主要来源
+      messages = fitMessages(messages);
       continue;
     }
 
-    // final / unknown → 结束
+    // 有工具意图但解析失败（缺 Input / 工具名未注册 / JSON 截断 / 空输出）：
+    // 不能当成功——否则解析器缺陷会被静默记成"回答成功"，stats 与评测基线全部失真。
+    // 答案仍用原文，保证用户看得到模型实际输出。
+    if (parsed.type === "unparsed") {
+      const answer = parsed.text ?? text.trim();
+      emit({ type: "error", message: "模型输出未能解析为工具调用或最终回答（unparsed）" });
+      return { answer, rawTexts, steps, ok: false, reason: "unparsed" };
+    }
+
+    // final → 结束
     const answer = parsed.type === "final" ? parsed.text : text.trim();
     emit({ type: "final", text: answer });
     return { answer, rawTexts, steps, ok: true };

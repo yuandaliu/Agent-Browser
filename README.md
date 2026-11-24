@@ -98,11 +98,16 @@ public/sw.js              离线缓存 Service Worker（与 src/swStrategies.js 
 
 ## 测试
 
-单元测试（vitest，`tests/unit/` 共 21 个文件）覆盖解析器与三协议、工具与计算器、记忆（含裁剪串行化）、
+单元测试（vitest，`tests/unit/` 共 22 个文件）覆盖解析器与三协议、工具与计算器、记忆（含裁剪串行化）、
 页面读取（含 bootstrap 时序）、上下文预算、失败日志、聊天组件、dev-proxy（含多上游 fallback）、模型自适应、
 SW 缓存策略（含与 `public/sw.js` 的同步守卫）、JSON Schema、嵌入式 API；
 E2E（Playwright + 系统 Chrome + WebGPU）覆盖全部阶段验收点：进度条 0→100%、控制台「模型已就绪」、时间工具、
 两位数乘法（12×34=408）、跨轮记忆（“我叫小明”→“我叫什么名字”）、长期记忆工具、界面元素、控制台零报错。
+
+**效果评测基线**（`npm run test:eval`）：`tests/eval-cases.mjs` 固定 20 条工具调用用例，覆盖
+单步工具 / 多步组合 / 无需工具 / 参数异常 / 注入诱导五类，跑完输出成功率、平均步数、平均 TTFT——
+让「采样参数调整、协议切换、解析器改动」这类变更的收益**可被证明、可防回退**。
+用例集自身有单测守卫（`tests/unit/evalCases.test.js`：工具名不得与注册表漂移、id 唯一、语义不矛盾）。
 
 完整命令与前置条件见 `USAGE.md` 的「常用命令」。
 
@@ -123,13 +128,25 @@ E2E（Playwright + 系统 Chrome + WebGPU）覆盖全部阶段验收点：进度
 也可把 `server/dev-proxy.mjs` 部署为 Cloudflare Worker 以获得完整健康检查能力（参见 BrowserAI 仓库的 `worker-template/`）。
 
 > **公网部署安全**：把 `dev-proxy.mjs` 部署为公网可访问的服务前，务必设置 `PROXY_TOKEN` 环境变量开启访问
-> 令牌校验（请求需携带 `X-Proxy-Token` 头或 `?token=` 参数），否则代理会沦为开放镜像中转站，带来流量成本
-> 与合规风险。此外模型权重来自 hf-mirror 等第三方镜像，属供应链信任范畴，请知悉。
+> 令牌校验（请求需携带 `X-Proxy-Token` 头；`?token=` 查询参数已废弃，会进入浏览器历史与中间层日志），
+> 否则代理会沦为开放镜像中转站，带来流量成本与合规风险。
+>
+> 2026-11 起有三处默认收紧：① 只监听 `127.0.0.1`（跨机器调试需显式 `PROXY_HOST=0.0.0.0` 并配令牌）；
+> ② CORS 默认只回显本地 origin（跨源嵌入用 `PROXY_CORS_ORIGINS` 显式放开）；③ 3xx 只跟随**白名单内镜像**的
+> https 目标（`PROXY_ALLOW_REDIRECTS=0` 可完全关闭跟随），避免被上游 `Location` 引导去读内网/云元数据。
+> 令牌比较使用 `sha256 + timingSafeEqual`，路径含 `..` / 双重编码 / 超深一律 404。
+>
+> 此外模型权重来自 hf-mirror 等第三方镜像，属供应链信任范畴，请知悉。
 
 ## 离线缓存（Service Worker）
 
-`createLocalAgent()` 在 `ready()` 内部会自动注册 `public/sw.js`（best-effort，失败仅 `console.warn`，不阻断主流程）。
-注册成功后：
+**默认不注册**：`serviceWorker` 默认已是 `false`。原因见下——`register("/sw.js")` 的默认 scope 是
+"脚本所在目录"，根部署时等于**整站**，嵌入第三方页面就会接管宿主全站的导航与 `/assets/*` 缓存。
+本项目自己的页面（`src/main.js` / `search.html`）在调用处显式传 `serviceWorker: true`；
+`demo/embed-demo.html` 刻意保持默认（它模拟"第三方宿主"，用来演示嵌入方不接管宿主 scope）。
+
+显式开启后，`ready()` 内部会 best-effort 注册 SW（失败仅 `console.warn`，不阻断主流程），
+并在控制台打印**实际生效的 scope**。注册成功后：
 
 | 资源类型 | 缓存策略 | 缓存名 | 原因 |
 | --- | --- | --- | --- |
@@ -217,6 +234,8 @@ E2E（Playwright + 系统 Chrome + WebGPU）覆盖全部阶段验收点：进度
 目录校验（单元测试强制断言）。`load()` 会把目录外的 id 降级到最低可用档并 `console.warn`；
 `agent.getAvailableModels()` 会按 SDK 真实目录过滤（宿主 UI 应使用它渲染下拉——主页面 `src/main.js` 目前仍用
 未过滤的 `getModelOptions()`，因当前 3 个档位都在目录内故不会出错，见 `REVIEW.md` 的 A7）。
+当目录与 `MODEL_OPTIONS` **零交集**时，该函数仍返回全部选项（避免下拉变空），但会 `console.warn` 提示配置/版本脱节
+—— 这种情况下展示出来的每一档其实都不可加载。
 
 **新模型接入前请确认**：
 
@@ -248,6 +267,15 @@ E2E（Playwright + 系统 Chrome + WebGPU）覆盖全部阶段验收点：进度
 失败的对话不会写入 IndexedDB 历史（避免污染后续上下文），而是记入失败日志（最近 20 条，含 reason / steps /
 rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 清空。
 
+**失败口径（2026-11 起）**：
+
+- `reason` 取值：`aborted` / `loop` / `max_steps` / `error` / **`unparsed`**。`unparsed` = 模型输出了
+  工具调用意图（出现 `Action:` / `<tool_call>` / `"action":` 痕迹）但格式坏到解析不出 action——
+  它**不再被当成成功**，否则解析器的缺陷会被静默记成"回答成功"，`getStats()` 与评测基线都会失真。
+- 纯文本回答（无工具痕迹）仍是 `ok: true`，不会被误判为失败。
+- 工具层：handler 返回的业务失败字符串（`"计算失败：…"` 等）也计入 `toolFailures`，
+  不再只统计抛异常的情况。
+
 **JSON Schema 工具定义**：每个工具的 `parametersSchema` 在 `src/tools.js` 的 TOOLS 注册表中维护（单一数据源），
 由 `src/toolSchemas.js` 派生：
 
@@ -275,7 +303,7 @@ rawTexts），宿主可用 `agent.getFailureLog()` 读取、`clearFailureLog()` 
 ├── server/         # 本地模型代理服务器（dev-proxy.mjs）
 ├── public/         # 离线缓存 Service Worker（sw.js）
 ├── demo/           # 嵌入示例（embed-demo.html）
-├── tests/          # 单元测试（tests/unit，21 个文件）+ E2E 验收脚本
+├── tests/          # 单元测试（tests/unit，22 个文件）+ E2E 验收脚本 + 评测基线（eval-cases / eval-agent）
 ├── tools/          # 本机运维脚本（git-push.ps1 / .cmd：自适应选路推送，用法的见其头部注释）
 ├── research/       # 市场与技术调研底稿（REVIEW.md 的来源，含未核验条目清单）
 ├── vercel.json     # Vercel 部署配置（rewrites → 镜像）

@@ -11,12 +11,14 @@
  * 用法：node tests/e2e.mjs [--only-load]
  * 依赖：dev-proxy (8787) 与 vite dev (5189) 已启动
  */
-import { launchBrowser, collectConsole, waitFor } from "./e2e-helpers.mjs";
+import { launchBrowserSafe, collectConsole, waitFor } from "./e2e-helpers.mjs";
 
 const BASE_URL = process.env.BASE_URL ?? "http://127.0.0.1:5189";
 const ONLY_LOAD = process.argv.includes("--only-load");
 
-const browser = await launchBrowser({ headless: true });
+// 用 launchBrowserSafe：受限环境下 chromium.launch 会抛 `spawn EPERM`（Playwright 需要命名管道），
+// 直接调用的话异常落在 try 之外，脚本会以未捕获异常崩溃而不是给出可读诊断。
+const browser = await launchBrowserSafe({ headless: true });
 const page = await browser.newPage();
 const { errors, warnings, logs } = collectConsole(page);
 

@@ -107,6 +107,31 @@ describe("getAvailableModelOptions — SDK 目录过滤", () => {
     expect(getAvailableModelOptions(presets)).toEqual(getModelOptions());
   });
 
+  it("零交集时打 warn 留痕（否则症状只有「选中即报错」）", () => {
+    const originalWarn = console.warn;
+    const calls = [];
+    console.warn = (...args) => calls.push(args);
+    try {
+      getAvailableModelOptions([{ id: "some-unknown-model" }]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(String(calls[0][0])).toContain("零交集");
+  });
+
+  it("目录为空时不打 warn（无从判断，属正常降级）", () => {
+    const originalWarn = console.warn;
+    const calls = [];
+    console.warn = (...args) => calls.push(args);
+    try {
+      getAvailableModelOptions([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(calls).toHaveLength(0);
+  });
+
   it("返回浅拷贝（mutation 不污染内部常量）", () => {
     const available = getAvailableModelOptions([{ id: "Qwen3.5-0.8B-q4f16_1-MLC" }]);
     available[0].label = "HACKED";

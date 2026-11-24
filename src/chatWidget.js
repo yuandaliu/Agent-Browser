@@ -92,6 +92,8 @@ export function createChatWidget({
   let answering = false; // 对话进行中（防 Enter 键绕过 disabled 触发并发 chat）
   let typeTimer = null; // 打字机定时器（显式持有以便清理）
   let abortController = null; // 中止当前生成
+  let sendSeq = 0; // 每次 send 的令牌：clear() 之后旧 send 的 finally 不得覆盖新状态
+  let activeSendDone = null; // 在途 send 的完成信号（clear() 需等它落地再清库）
 
   // ---------- 内部工具 ----------
   function buildWelcome() {
@@ -180,6 +182,11 @@ export function createChatWidget({
       return;
     }
 
+    const token = ++sendSeq;
+    let markDone = null;
+    activeSendDone = new Promise((resolve) => {
+      markDone = resolve;
+    });
     answering = true;
     abortController = new AbortController();
     sendBtn.textContent = "停止";
@@ -268,11 +275,17 @@ export function createChatWidget({
       bubble.classList.remove("streaming");
       bubble.textContent = isAborted ? "（已中止）" : `出错了：${err?.message ?? err}`;
     } finally {
-      answering = false;
-      abortController = null;
-      sendBtn.textContent = "发送";
-      sendBtn.disabled = !enabled;
-      if (enabled) input.focus();
+      markDone?.();
+      // 只有本次仍是"当前发送"时才复位 UI：clear() 之后可能已经开始了新一轮对话，
+      // 旧 finally 若无条件复位，会把新对话的"停止"按钮改回"发送"。
+      if (token === sendSeq) {
+        activeSendDone = null;
+        answering = false;
+        abortController = null;
+        sendBtn.textContent = "发送";
+        sendBtn.disabled = !enabled;
+        if (enabled) input.focus();
+      }
     }
   }
 
@@ -299,12 +312,23 @@ export function createChatWidget({
     if (enabled) input.focus();
   }
 
-  /** 新对话：中止生成、清理定时器、清空历史与日志，并重置状态与按钮 */
+  /** 新对话：中止生成、等待在途轮次落地、清空历史与日志，并重置状态与按钮 */
   async function clear() {
     stopTypewriter();
     if (abortController) abortController.abort();
+    // 关键：先等在途 send 真正落地（embed 侧据此决定是否落库），再清库。
+    // 否则被中止的轮次会在 clearHistory 之后写入"（已中止）"占位，
+    // 留下一条没有对应 user 的孤儿 assistant 消息（下一轮 getRecent 会把它注入上下文）。
+    // 加 5s 上限：模型异常卡死时不能让"新对话"按钮永久挂起。
+    const pending = activeSendDone;
+    if (pending) {
+      await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 5000))]);
+    }
+    sendSeq++; // 让旧 send 的 finally 失效，避免覆盖接下来的新对话状态
+    stopTypewriter();
     answering = false;
     abortController = null;
+    activeSendDone = null;
     sendBtn.textContent = "发送";
     sendBtn.disabled = !enabled;
     try {
@@ -319,6 +343,7 @@ export function createChatWidget({
   /** 卸载组件：停止定时器、中止生成、移除 DOM */
   function destroy() {
     stopTypewriter();
+    sendSeq++;
     if (abortController) abortController.abort();
     root.remove();
   }

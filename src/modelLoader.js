@@ -166,14 +166,27 @@ export async function getDefaultModelIdAsync(snapshot) {
  * 背景：MODEL_OPTIONS 与 SDK 目录脱节时会出现"选中即抛 UnknownModelError"的档位。
  * UI 构建下拉时应改用本函数，保证只展示真正可加载的档位。
  *
+ * 两种降级都返回全部选项（避免宿主下拉变空），区别是**零交集一定告警**：
+ *   - presets 为空：SDK 未提供目录，无从判断 → 静默返回全部；
+ *   - 有目录但零交集：每一个档位都不可加载 → 返回全部并 warn，便于定位"配置/版本脱节"。
+ *
+ * 上限：没有"严格模式"（返回空列表）——那会让宿主下拉直接空白。宿主若需要，可自行
+ * `filter` 或等后续加 `{ strict: true }` 选项（见 REVIEW-2026-11 #22）。
+ *
  * @param {readonly {id:string}[]} presets - BrowserAI.presets（或任何含 id 字段的对象数组）
- * @returns {object[]} 过滤后的选项（浅拷贝）；presets 为空/无交集时返回全部选项（降级，不阻断）
+ * @returns {object[]} 过滤后的选项（浅拷贝）
  */
 export function getAvailableModelOptions(presets) {
   const ids = new Set((presets ?? []).map((p) => p?.id).filter(Boolean));
   if (ids.size === 0) return getModelOptions();
   const available = getModelOptions().filter((m) => ids.has(m.id));
-  return available.length > 0 ? available : getModelOptions();
+  if (available.length > 0) return available;
+  // 零交集 = MODEL_OPTIONS 与 SDK 目录完全脱节：此处返回的每一档都不可加载。
+  // 保留"返回全部"是为了不让宿主下拉变空，但必须留痕——否则症状只会是"选中就报错"。
+  console.warn(
+    `[model-loader] MODEL_OPTIONS 与 SDK 目录零交集（目录 ${ids.size} 项），已降级为全部选项——请检查 SDK 版本或 MODEL_OPTIONS 配置`,
+  );
+  return getModelOptions();
 }
 
 /**

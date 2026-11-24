@@ -200,3 +200,56 @@ describe("runAgent — budgetObservation prompt injection 防护", () => {
     expect(obsMessage.content).toContain("工具返回的数据");
   });
 });
+
+describe("runAgent — 解析失败语义（#14）", () => {
+  it("有工具意图但解析失败 → ok:false + reason='unparsed'，answer 保留原文", async () => {
+    const memory = makeMemory();
+    const generate = makeGenerate([
+      // 有 Action 痕迹但没有工具名 → 解析不出 action
+      { text: "Action: 我想调用工具" },
+    ]);
+
+    const onStep = vi.fn();
+    const result = await runAgent({ userInput: "随便", memory, generate, onStep });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("unparsed");
+    expect(result.answer).toContain("Action");
+    const errStep = onStep.mock.calls.map((c) => c[0]).find((s) => s.type === "error");
+    expect(errStep).toBeDefined();
+  });
+
+  it("纯文本回答（无工具痕迹）→ ok:true，不误判为失败", async () => {
+    const memory = makeMemory();
+    const generate = makeGenerate([{ text: "你好，我是本地智能体。" }]);
+    const result = await runAgent({ userInput: "你好", memory, generate });
+    expect(result.ok).toBe(true);
+    expect(result.answer).toBe("你好，我是本地智能体。");
+  });
+
+  it("空输出 → ok:false（模型没产出任何内容）", async () => {
+    const memory = makeMemory();
+    const generate = makeGenerate([{ text: "" }]);
+    const result = await runAgent({ userInput: "测试", memory, generate });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("unparsed");
+  });
+});
+
+describe("runAgent — 循环键稳定性（#15）", () => {
+  it("同一调用换参数键序仍判为重复（第 3 次终止）", async () => {
+    const memory = makeMemory();
+    const generate = makeGenerate([
+      { text: 'Action: calculate\nAction Input: {"expression":"1+1","x":1}' },
+      { text: 'Action: calculate\nAction Input: {"x":1,"expression":"1+1"}' },
+      { text: 'Action: calculate\nAction Input: {"expression":"1+1","x":1}' },
+    ]);
+
+    const result = await runAgent({ userInput: "算", memory, generate, maxSteps: 5 });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("loop");
+    // 第 3 次的输出用于触发终止判断，所以 generate 调 3 次；但第 3 次不再执行工具
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(result.steps.filter((s) => s.type === "observation")).toHaveLength(2);
+  });
+});

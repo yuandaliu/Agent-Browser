@@ -4,10 +4,10 @@
  *       智能体嵌入初始化、加载流程 UI、错误处理、未加载状态、控制台零报错
  * 用法：node tests/e2e-search-probe.mjs <url>
  */
-import { launchBrowser, collectConsole, waitFor } from "./e2e-helpers.mjs";
+import { launchBrowserSafe, collectConsole, waitFor } from "./e2e-helpers.mjs";
 
 const url = process.argv[2] ?? "http://127.0.0.1:5189/search.html";
-const browser = await launchBrowser({ headless: true });
+const browser = await launchBrowserSafe({ headless: true });
 const page = await browser.newPage();
 const { errors, warnings, logs } = collectConsole(page);
 

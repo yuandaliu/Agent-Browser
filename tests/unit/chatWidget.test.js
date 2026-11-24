@@ -206,4 +206,78 @@ describe("createChatWidget — 新对话", () => {
     expect(log.children.length).toBe(1); // 仅剩欢迎语
     widget.destroy();
   });
+
+  it("clear() 等待在途 send 落地后才清库（避免孤儿 assistant 占位）", async () => {
+    let resolveFirst;
+    const agent = makeAgent({
+      chat: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      ),
+    });
+    const { widget } = setup(agent);
+    widget.setEnabled(true);
+
+    const first = widget.send("第一次");
+    await Promise.resolve();
+
+    const clearing = widget.clear();
+    // 此时 send 尚未落地，clear() 不应提前清库
+    expect(agent.clearHistory).not.toHaveBeenCalled();
+
+    resolveFirst({ answer: "答案", ok: true, steps: [] });
+    await first;
+    await clearing;
+    expect(agent.clearHistory).toHaveBeenCalledTimes(1);
+    widget.destroy();
+  });
+
+  it("旧 send 迟到落地时不覆盖新对话的按钮状态（令牌保护）", async () => {
+    let resolveFirst;
+    let resolveSecond;
+    let calls = 0;
+    const agent = makeAgent({
+      chat: vi.fn(() => {
+        calls++;
+        if (calls === 1) {
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return new Promise((resolve) => {
+          resolveSecond = resolve;
+        });
+      }),
+    });
+    const { widget, sendBtn } = setup(agent);
+    widget.setEnabled(true);
+
+    const first = widget.send("第一次");
+    await Promise.resolve();
+    expect(sendBtn.textContent).toBe("停止");
+
+    // 让 clear() 在 5s 等待上限后放弃（旧 send 仍未落地）
+    vi.useFakeTimers();
+    const clearing = widget.clear();
+    await vi.advanceTimersByTimeAsync(5001);
+    await clearing;
+    vi.useRealTimers();
+
+    // 新一轮开始
+    const second = widget.send("第二次");
+    await Promise.resolve();
+    expect(sendBtn.textContent).toBe("停止");
+
+    // 旧 send 此时才落地：令牌已过期，不得把按钮改回"发送"
+    resolveFirst({ answer: "旧答案", ok: true, steps: [] });
+    await first;
+    expect(sendBtn.textContent).toBe("停止");
+
+    resolveSecond({ answer: "新答案", ok: true, steps: [] });
+    await second;
+    expect(sendBtn.textContent).toBe("发送");
+    widget.destroy();
+  });
 });

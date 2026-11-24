@@ -33,7 +33,9 @@ const el = {
 // 智能体 + 聊天组件
 // ---------------------------------------------------------------------------
 
-const agent = createLocalAgent({ onEvent: handleModelEvent });
+// serviceWorker 默认已改为 false（避免嵌入方接管宿主全站 scope），
+// 本项目自己的页面需要离线能力，必须显式开启。
+const agent = createLocalAgent({ onEvent: handleModelEvent, serviceWorker: true });
 
 const widget = createChatWidget({
   container: el.chatWidget,
